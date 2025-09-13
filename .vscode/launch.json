@@ -5,11 +5,35 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "type": "chrome",
+            "type": "node",
             "request": "launch",
-            "name": "Launch Chrome against localhost",
-            "url": "http://localhost:3000",
-            "webRoot": "${workspaceFolder}"
+            "name": "Debug Backend index.mjs",
+            "program": "${workspaceFolder}/backend/index.mjs",
+            "cwd": "${workspaceFolder}/backend",
+            "console": "integratedTerminal",
+            "skipFiles": ["<node_internals>/**"],
+            "env": {
+                "NODE_ENV": "development"
+            },
+            "runtimeArgs": ["--experimental-modules"],
+            "restart": true,
+            "autoAttachChildProcesses": true
+        },
+        {
+            "type": "node",
+            "request": "launch",
+            "name": "Debug Backend send-self.mjs",
+            "program": "${workspaceFolder}/backend/send-self.mjs",
+            "cwd": "${workspaceFolder}/backend",
+            "console": "integratedTerminal",
+            "skipFiles": ["<node_internals>/**"],
+            "env": {
+                "NODE_ENV": "development"
+            },
+            "runtimeArgs": ["--experimental-modules"],
+            "restart": true,
+            "autoAttachChildProcesses": true
         }
+        
     ]
 }

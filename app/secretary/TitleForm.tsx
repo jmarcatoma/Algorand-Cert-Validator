@@ -1,3 +1,4 @@
+'use client';
 
 import { useState } from 'react'
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/card'
@@ -15,9 +16,9 @@ import {
   AlertDialogFooter
 } from '@/components/ui/alert-dialog'
 
-import { Upload } from 'lucide-react'
-import { X } from 'lucide-react'
-import { Eye } from 'lucide-react'
+import { Upload, X, Eye, Link as LinkIcon, Download } from 'lucide-react'
+
+// 🔥 IMPORT ELIMINADO:  import { set } from 'date-fns'
 
 const facultades = {
   "Facultad de Administración de Empresas": [
@@ -81,6 +82,10 @@ export default function TitleForm({ wallet }: { wallet: string | null }) {
 
   const [showSuccess, setShowSuccess] = useState(false)
   const [cidGenerado, setCidGenerado] = useState('')
+  const [hashHexGenerado, setHashHexGenerado] = useState<string>('')
+  const [anchoring, setAnchoring] = useState(false)
+  const [txId, setTxId] = useState<string>('')
+  const [round, setRound] = useState<number | null>(null)
 
   const generarPDF = async () => {
     const existingPdfBytes = await fetch('/titulo_base_final.pdf').then(res => res.arrayBuffer())
@@ -102,17 +107,14 @@ export default function TitleForm({ wallet }: { wallet: string | null }) {
     }
 
     drawCentered(facultad.replace('Facultad de ', ''), 551, 30)
-    const tituloFinal = facultades[facultad].find(c => c.nombre === carrera)?.titulo || carrera
+    const tituloFinal = (facultades as any)[facultad]?.find((c: any) => c.nombre === carrera)?.titulo || carrera
     drawCentered(tituloFinal, 470, 30)
     drawCentered(nombre, 395, 30)
 
-    page.drawText(`${new Date(fecha).toLocaleDateString('es-EC', { day: '2-digit', month: 'long', year: 'numeric' })}`, {
-      x: 477,
-      y: 252,
-      size: 11,
-      font,
-      color: rgb(0, 0, 0)
-    })
+    page.drawText(
+      `${new Date(fecha).toLocaleDateString('es-EC', { day: '2-digit', month: 'long', year: 'numeric' })}`,
+      { x: 477, y: 252, size: 11, font, color: rgb(0, 0, 0) }
+    )
 
     page.drawText(` ${refrendado}`, { x: 125, y: 80, size: 11, font: fontBold, color: rgb(0, 0, 0) })
     page.drawText(` ${codigo}`, { x: width - 97, y: 80, size: 11, font: fontBold, color: rgb(0, 0, 0) })
@@ -126,8 +128,20 @@ export default function TitleForm({ wallet }: { wallet: string | null }) {
       const blob = new Blob([pdfBytes], { type: 'application/pdf' })
       const url = URL.createObjectURL(blob)
       window.open(url, '_blank')
-    } catch (err) {
+    } catch {
       toast.error('Error al generar vista previa')
+    }
+  }
+
+  // ✅ MOVER AQUÍ (fuera de subirTitulo): descargar original desde backend
+  const descargarOriginal = async () => {
+    try {
+      const h = hashHexGenerado?.trim()
+      if (!h) return toast.error('Aún no hay hash para descargar')
+      const url = `http://localhost:4000/api/certificados/${h}/download`
+      window.open(url, '_blank')
+    } catch {
+      toast.error('No se pudo iniciar la descarga')
     }
   }
 
@@ -136,31 +150,78 @@ export default function TitleForm({ wallet }: { wallet: string | null }) {
       return toast.error('Completa todos los campos')
     }
 
+    setTxId('')
+    setRound(null)
+    setCidGenerado('')
+    setHashHexGenerado('')
+
     try {
       const pdfBytes = await generarPDF()
+
+      // hash SHA-256 del PDF
       const hashBuffer = await crypto.subtle.digest('SHA-256', pdfBytes)
       const hashArray = Array.from(new Uint8Array(hashBuffer))
       const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
+      setHashHexGenerado(hashHex)
 
+      // 1) Guardar en backend (IPFS + BD)
       const formData = new FormData()
       formData.append('file', new Blob([pdfBytes], { type: 'application/pdf' }), `${nombre}_titulo.pdf`)
       formData.append('wallet', wallet)
       formData.append('hash', hashHex)
 
-      const res = await fetch('http://localhost:4000/guardar-titulo', {
-        method: 'POST',
-        body: formData
-      })
-
+      const res = await fetch('http://localhost:4000/guardar-titulo', { method: 'POST', body: formData })
       if (res.status === 409) {
         toast.error('Este título ya existe (hash duplicado)')
         return
       }
+      if (!res.ok) {
+        const e = await res.text().catch(() => '')
+        throw new Error(e || 'Error al subir el título')
+      }
 
       const data = await res.json()
-      setCidGenerado(data.cid)
-      setShowSuccess(true)
 
+      const serverHash = data.hash as string;
+      setCidGenerado(data.cid ?? '');
+      setHashHexGenerado(serverHash);
+      setShowSuccess(true);
+      toast.success('Título guardado (IPFS + BD)');
+
+      // 2) Anclar en Algorand (tx 0 ALGO con note = hashHex)
+      try {
+        setAnchoring(true);
+        const anchorRes = await fetch('http://localhost:4000/api/algod/anchorNote', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: wallet, hashHex: serverHash })
+        });
+
+        const ajson = await anchorRes.json().catch(() => ({}));
+        if (anchorRes.ok && ajson.txId) {
+          setTxId(ajson.txId);
+          setRound(ajson.round ?? null);
+          toast.success('Transacción enviada a Algorand');
+
+          // 3) Adjuntar tx/round a la fila usando el MISMO hash
+          try {
+            await fetch(`http://localhost:4000/api/certificados/${serverHash}/attach-tx`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ txId: ajson.txId, round: ajson.round ?? null })
+            });
+          } catch {
+            console.warn('No se pudo adjuntar tx/round (attach-tx)');
+          }
+        } else {
+          toast.error(ajson?.error || 'No se pudo anclar en Algorand');
+        }
+      } catch (err) {
+        console.error('anchor error', err);
+        toast.error('Error de red al anclar en Algorand');
+      } finally {
+        setAnchoring(false);
+      }
     } catch (err) {
       console.error(err)
       toast.error('Error al subir el título')
@@ -169,55 +230,135 @@ export default function TitleForm({ wallet }: { wallet: string | null }) {
 
   return (
     <>
-    <Card>
-      <CardHeader>
-        <CardTitle>Nuevo Título Académico</CardTitle>
-        <CardDescription>Completa los campos antes de generar el PDF.</CardDescription>
-      </CardHeader>
-      <CardContent className="grid gap-4">
-        <Input placeholder="Nombre del Estudiante" value={nombre} onChange={e => setNombre(e.target.value)} />
-        <Select value={facultad} onValueChange={setFacultad}>
-          <SelectTrigger><SelectValue placeholder="Seleccione una facultad" /></SelectTrigger>
-          <SelectContent>
-            {Object.keys(facultades).map(f => (
-              <SelectItem key={f} value={f}>{f}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        {facultad && (
-          <Select value={carrera} onValueChange={setCarrera}>
-            <SelectTrigger><SelectValue placeholder="Seleccione una carrera" /></SelectTrigger>
+      <Card>
+        <CardHeader>
+          <CardTitle>Nuevo Título Académico</CardTitle>
+          <CardDescription>Completa los campos antes de generar el PDF.</CardDescription>
+        </CardHeader>
+
+        <CardContent className="grid gap-4">
+          <Input placeholder="Nombre del Estudiante" value={nombre} onChange={e => setNombre(e.target.value)} />
+          <Select value={facultad} onValueChange={setFacultad}>
+            <SelectTrigger><SelectValue placeholder="Seleccione una facultad" /></SelectTrigger>
             <SelectContent>
-              {(facultades[facultad] || []).map((carrera, index) => (
-                <SelectItem key={`${facultad}-${index}`} value={carrera.nombre}>{carrera.nombre}</SelectItem>
+              {Object.keys(facultades).map(f => (
+                <SelectItem key={f} value={f}>{f}</SelectItem>
               ))}
             </SelectContent>
           </Select>
-        )}
-        <Input placeholder="Código de Matrícula" value={codigo} onChange={e => setCodigo(e.target.value)} />
-        <Input placeholder="Número de Título" value={numero} onChange={e => setNumero(e.target.value)} type="number" />
-        <Input placeholder="Refrendado" value={refrendado} onChange={e => setRefrendado(e.target.value)} type="number" />
-        <Input type="date" value={fecha} onChange={e => setFecha(e.target.value)} />
-      </CardContent>
-      <CardFooter className="flex justify-end gap-4">
-        <Button variant="outline" onClick={vistaPrevia}> <Eye className="w-4 h-4" /> Vista Previa</Button>
-        <Button onClick={subirTitulo}> <Upload className="w-4 h-4" /> Subir Título</Button>
-      </CardFooter>
-      <AlertDialog open={showSuccess} onOpenChange={setShowSuccess}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>✅ Título subido con éxito</AlertDialogTitle>
-            <AlertDialogDescription className="break-words">
-              CID generado en IPFS:<br /> <span className="font-mono">{cidGenerado}</span>
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <Button onClick={() => setShowSuccess(false)}> <X className="w-4 h-4" /> Cerrar</Button>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </Card>
 
+          {facultad && (
+            <Select value={carrera} onValueChange={setCarrera}>
+              <SelectTrigger><SelectValue placeholder="Seleccione una carrera" /></SelectTrigger>
+              <SelectContent>
+                {((facultades as any)[facultad] || []).map((c: any, idx: number) => (
+                  <SelectItem key={`${facultad}-${idx}`} value={c.nombre}>{c.nombre}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+
+          <Input placeholder="Código de Matrícula" value={codigo} onChange={e => setCodigo(e.target.value)} />
+          <Input placeholder="Número de Título" value={numero} onChange={e => setNumero(e.target.value)} type="number" />
+          <Input placeholder="Refrendado" value={refrendado} onChange={e => setRefrendado(e.target.value)} type="number" />
+          <Input type="date" value={fecha} onChange={e => setFecha(e.target.value)} />
+
+          {/* Info post-acción */}
+          {hashHexGenerado && (
+            <div className="text-sm text-muted-foreground break-words">
+              <div><span className="font-semibold">Hash (SHA-256):</span> <span className="font-mono">{hashHexGenerado}</span></div>
+            </div>
+          )}
+
+          {(txId || round) && (
+            <div className="text-sm break-words space-y-1">
+              {txId && (
+                <>
+                  <div className="font-semibold">Transacción (Algorand):</div>
+                  <div className="font-mono">{txId}</div>
+                </>
+              )}
+              {typeof round === 'number' && (
+                <div>Round confirmado: <span className="font-mono">{round}</span></div>
+              )}
+              <div className="flex flex-wrap items-center gap-2 mt-1">
+                {/* 🚀 NUEVO BOTÓN: Descargar PDF */}
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={descargarOriginal}
+                  disabled={!hashHexGenerado}
+                  className="inline-flex items-center gap-2"
+                >
+                  <Download className="w-4 h-4" /> Descargar PDF (IPFS/Backend)
+                </Button>
+              </div>
+            </div>
+          )}
+        </CardContent>
+
+        <CardFooter className="flex justify-end gap-4">
+          <Button variant="outline" onClick={vistaPrevia}>
+            <Eye className="w-4 h-4" />&nbsp;Vista Previa
+          </Button>
+          <Button onClick={subirTitulo} disabled={anchoring}>
+            <Upload className="w-4 h-4" />&nbsp;{anchoring ? 'Anclando…' : 'Subir Título'}
+          </Button>
+        </CardFooter>
+
+        <AlertDialog open={showSuccess} onOpenChange={setShowSuccess}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>✅ Título subido con éxito</AlertDialogTitle>
+              <AlertDialogDescription className="break-words space-y-3">
+                {cidGenerado && (
+                  <div>
+                    CID generado en IPFS:<br />
+                    <span className="font-mono">{cidGenerado}</span>
+                  </div>
+                )}
+
+                {hashHexGenerado && (
+                  <div>
+                    Hash (SHA-256):<br />
+                    <span className="font-mono">{hashHexGenerado}</span>
+                  </div>
+                )}
+
+                {txId ? (
+                  <div className="space-y-2">
+                    <div>Se envió la transacción de anclado:</div>
+                    <div className="font-mono">{txId}</div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        onClick={descargarOriginal}
+                        disabled={!hashHexGenerado}
+                        className="inline-flex items-center gap-2"
+                      >
+                        <Download className="w-4 h-4" /> Descargar PDF (IPFS/Backend)
+                      </Button>
+                    </div>
+                    {typeof round === 'number' && (
+                      <div>Round confirmado: <span className="font-mono">{round}</span></div>
+                    )}
+                  </div>
+                ) : (
+                  <>Enviando transacción de anclado…</>
+                )}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <Button onClick={() => setShowSuccess(false)}>
+                <X className="w-4 h-4" /> Cerrar
+              </Button>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </Card>
     </>
   )
 }

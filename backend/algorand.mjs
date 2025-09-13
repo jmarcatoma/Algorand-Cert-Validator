@@ -22,11 +22,10 @@ const { server: algodServer, port: algodPort } = parseServerAndPort(ALGOD_URL, '
 const algodClient = new algosdk.Algodv2({ 'X-Algo-API-Token': ALGOD_TOKEN }, algodServer, algodPort);
 
 // INDEXER (opcional)
-let indexerClient = null;
-if (process.env.INDEXER_URL) {
-  const { server: indexerServer, port: indexerPort } = parseServerAndPort(process.env.INDEXER_URL, 'http://127.0.0.1', '8980');
-  // Indexer no necesita token localmente
-  indexerClient = new algosdk.Indexer('', indexerServer, indexerPort);
-}
+const INDEXER_URL   = process.env.INDEXER_URL;
+const INDEXER_TOKEN = process.env.INDEXER_TOKEN || '';
+export const indexerClient = INDEXER_URL
+  ? new algosdk.Indexer(INDEXER_TOKEN, INDEXER_URL, '')
+  : null;
 
 export { algodClient, indexerClient };

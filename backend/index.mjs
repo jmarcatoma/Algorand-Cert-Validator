@@ -11,6 +11,57 @@ import algosdk from 'algosdk';
 
 dotenv.config();
 
+// Convierte cualquier "address-like" en string base32 (WF...)
+// Soporta: string, {publicKey: Uint8Array|obj}, {addr:string}
+// Reemplaza tu función toAddrString con esta versión mejorada
+const toAddrString = (addrLike) => {
+  if (!addrLike) return null;
+  
+  // Caso 1: Ya es un string válido
+  if (typeof addrLike === 'string') {
+    const cleaned = addrLike.trim();
+    return algosdk.isValidAddress(cleaned) ? cleaned : null;
+  }
+
+  // Caso 2: Objeto con propiedad addr (string)
+  if (addrLike.addr && typeof addrLike.addr === 'string') {
+    const cleaned = addrLike.addr.trim();
+    return algosdk.isValidAddress(cleaned) ? cleaned : null;
+  }
+
+  // Caso 3: Objeto con publicKey (como en tu caso)
+  if (addrLike.publicKey) {
+    try {
+      // Convertir objeto indexado a Uint8Array si es necesario
+      const publicKeyBytes = addrLike.publicKey instanceof Uint8Array
+        ? addrLike.publicKey
+        : new Uint8Array(Object.values(addrLike.publicKey));
+      
+      // Validar que tenga 32 bytes
+      if (publicKeyBytes.length === 32) {
+        const addr = algosdk.encodeAddress(publicKeyBytes);
+        return algosdk.isValidAddress(addr) ? addr : null;
+      }
+    } catch (e) {
+      console.error('[toAddrString] Error procesando publicKey:', e.message);
+      return null;
+    }
+  }
+
+  // Caso 4: Directamente es un Uint8Array de 32 bytes (clave pública)
+  if (addrLike instanceof Uint8Array && addrLike.length === 32) {
+    try {
+      const addr = algosdk.encodeAddress(addrLike);
+      return algosdk.isValidAddress(addr) ? addr : null;
+    } catch (e) {
+      console.error('[toAddrString] Error con Uint8Array:', e.message);
+      return null;
+    }
+  }
+
+  return null;
+};
+
 const app = express();
 const PORT = process.env.PORT || 4000;
 const toJSONSafe = (x) =>
@@ -33,15 +84,60 @@ const MNEMONIC = process.env.ALGOD_MNEMONIC;
 let serverAcct = null;
 if (MNEMONIC) {
   try {
-    serverAcct = algosdk.mnemonicToSecretKey(MNEMONIC);
-    console.log('[ANCHOR address]', serverAcct.addr);
+    const m = (process.env.ALGOD_MNEMONIC || '').trim();
+    const words = m.split(/\s+/).filter(Boolean);
+    
+    console.log(`[DEBUG] Mnemonic words count: ${words.length}`);
+    
+    if (words.length !== 25) {
+      console.warn(`[Signer] ALGOD_MNEMONIC inválido: ${words.length} palabras (deben ser 25)`);
+    } else {
+      const account = algosdk.mnemonicToSecretKey(words.join(' '));
+      
+      // Log para debug
+      console.log('[DEBUG] Account from mnemonic:', {
+        hasAddr: !!account.addr,
+        addrType: typeof account.addr,
+        addr: account.addr,
+        hasSecretKey: !!account.sk
+      });
+      
+      // Asegurar que addr sea un string válido
+      if (typeof account.addr === 'string' && algosdk.isValidAddress(account.addr)) {
+        serverAcct = account;
+        console.log(`[Signer] ✅ Cuenta cargada correctamente: ${serverAcct.addr}`);
+      } else {
+        // Si addr no es string, intentar convertir desde publicKey
+        console.warn('[Signer] addr no es string válido, intentando generar desde publicKey...');
+        
+        if (account.sk && account.sk.length >= 32) {
+          // Extraer la clave pública de los primeros 32 bytes de sk
+          const publicKey = account.sk.slice(32, 64);
+          const addr = algosdk.encodeAddress(publicKey);
+          
+          serverAcct = {
+            addr: addr,
+            sk: account.sk
+          };
+          console.log(`[Signer] ✅ Dirección regenerada: ${serverAcct.addr}`);
+        } else {
+          console.error('[Signer] No se pudo generar dirección válida');
+        }
+      }
+    }
   } catch (e) {
-    console.warn('[ANCHOR] MNEMONIC inválido:', e?.message || String(e));
+    console.error('[Signer] Error cargando mnemónico:', e.message || e);
+    serverAcct = null;
   }
 } else {
   console.warn('[ANCHOR] Falta ALGOD_MNEMONIC en .env; /api/algod/anchorNote deshabilitado');
 }
 
+console.log('[Signer] Estado final:', {
+  configured: !!serverAcct,
+  hasValidAddr: serverAcct ? algosdk.isValidAddress(serverAcct.addr) : false,
+  address: serverAcct?.addr || 'N/A'
+});
 
 // Esperar confirmación simple (opcional)
 async function waitForConfirmation(algod, txId, timeout = 15) {
@@ -203,43 +299,46 @@ app.post('/subir-certificado', upload.single('file'), async (req, res) => {
 
 // ---------- Guardar título (usa hash del front) + IPFS + opcional txid/round ----------
 app.post('/guardar-titulo', upload.single('file'), async (req, res) => {
-  const { wallet, hash, txid, round } = req.body;
-  const file = req.file;
-
-  if (!file || !wallet || !hash) {
-    return res.status(400).json({ error: 'Faltan datos requeridos' });
-  }
-
   try {
-    // ¿ya existe el hash?
-    const existe = await pool.query('SELECT 1 FROM certificados WHERE hash = $1', [hash]);
-    if (existe.rows.length > 0) {
+    const { wallet } = req.body;
+    const file = req.file;
+    if (!file || !wallet) return res.status(400).json({ error: 'Faltan datos (file, wallet)' });
+
+    const buffer = fs.readFileSync(file.path);
+
+    // ✅ Hash CANÓNICO calculado en servidor
+    const serverHashHex = crypto.createHash('sha256').update(buffer).digest('hex');
+
+    // ¿ya existe?
+    const dup = await pool.query('SELECT 1 FROM certificados WHERE hash = $1', [serverHashHex]);
+    if (dup.rowCount > 0) {
       fs.unlinkSync(file.path);
-      return res.status(409).json({ error: 'Hash ya registrado' });
+      return res.status(409).json({ error: 'Hash ya registrado', hash: serverHashHex });
     }
 
     // Subir a IPFS
-    const buffer = fs.readFileSync(file.path);
-    const result = await ipfs.add(buffer);
-    const cid = result.cid.toString();
+    const added = await ipfs.add(buffer);
+    const cid = added.cid.toString();
 
-    // Guardar en BD con txid/round si nos los pasaron
+    // Guardar en BD
     await pool.query(
-      `INSERT INTO certificados (wallet, nombre_archivo, hash, cid, txid, round)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [wallet, file.originalname, hash, cid, txid || null, round ? Number(round) : null]
+      'INSERT INTO certificados (wallet, nombre_archivo, hash, cid) VALUES ($1, $2, $3, $4)',
+      [wallet, file.originalname, serverHashHex, cid]
     );
 
     fs.unlinkSync(file.path);
-    res.json({ message: 'Título guardado exitosamente', cid, txid: txid || null, round: round || null });
+
+    // 🔁 DEVOLVEMOS hash canónico
+    return res.json({ message: 'Título guardado', cid, hash: serverHashHex });
   } catch (err) {
-    console.error('❌ Error al guardar título:', err);
-    res.status(500).json({ error: 'Error interno al guardar título' });
+    console.error('Error al guardar título:', err);
+    return res.status(500).json({ error: 'Error interno al guardar título' });
   }
 });
 
+
 // ---------- ALGOD: salud ----------
-app.get('/api/algod/health', async (req, res) => {
+app. get('/api/algod/health', async (req, res) => {
   try {
     await algodClient.healthCheck().do();
     res.json({ ok: true });
@@ -254,9 +353,9 @@ app.get('/api/algod/status', async (_req, res) => {
   try {
     const st = await algodClient.status().do();
     res.json({
-      lastRound: st['last-round'],
-      timeSinceLastRound: st['time-since-last-round'],
-      catchupTime: st['catchup-time'] ?? null,
+      lastRound: st['lastRound'],
+      timeSinceLastRound: st['timeSinceLastRound'],
+      catchupTime: st['catchupTime'] ?? null,
       lastCatchpoint: st['catchpoint'] ?? null,
     });
   } catch (e) {
@@ -264,16 +363,19 @@ app.get('/api/algod/status', async (_req, res) => {
   }
 });
 
+
+
 // ---------- ALGOD: suggested params ----------
-app.get('/api/algod/params', async (req, res) => {
+app.get('/api/algod/params', async (_req, res) => {
   try {
-    const params = await algodClient.getTransactionParams().do();
-    const safe = toJSONSafe(params); // <-- aquí convertimos BigInt -> string
+    const p = await algodClient.getTransactionParams().do();
+    const safe = JSON.parse(JSON.stringify(p, (k, v) => (typeof v === 'bigint' ? Number(v) : v)));
     res.json(safe);
   } catch (e) {
-    res.status(500).json({ error: e?.message || String(e) });
+    res.status(500).json({ error: e.message });
   }
 });
+
 
 // ---------- ALGOD: enviar TX firmada (raw base64) ----------
 app.post('/api/algod/sendRaw', async (req, res) => {
@@ -333,38 +435,74 @@ app.get('/api/tx/:txId/status', async (req, res) => {
   }
 });
 
+
 // ---------- ALGOD: anclar nota (server-signer) ----------
 app.post('/api/algod/anchorNote', express.json(), async (req, res) => {
   try {
-    if (!serverAcct) return res.status(501).json({ error: 'Server signer no configurado' });
-    const { to, hashHex } = req.body || {};
-    if (!to || !hashHex) return res.status(400).json({ error: 'Faltan to o hashHex' });
+    if (!serverAcct) {
+      return res.status(501).json({ error: 'Server signer no configurado' });
+    }
 
-    const note = new Uint8Array(Buffer.from(String(hashHex), 'hex'));
-    const params = await algodClient.getTransactionParams().do();
+    let { to, hashHex } = req.body || {};
+    to = typeof to === 'string' ? to.trim() : String(to || '').trim();
+    hashHex = typeof hashHex === 'string' ? hashHex.trim() : String(hashHex || '').trim();
 
+    // --- Helpers: convierten "algo" en string de dirección válido o lanzan
+    const addrToString = (a) => {
+      if (!a) return '';
+      if (typeof a === 'string') return a.trim();
+      if (a.addr && typeof a.addr === 'string') return a.addr.trim();              // por si te mandan {addr:"..."}
+      if (a.publicKey) return algosdk.encodeAddress(a.publicKey);                  // Address { publicKey }
+      if (a.addr && a.addr.publicKey) return algosdk.encodeAddress(a.addr.publicKey);
+      return String(a);
+    };
+
+    const canon = (addr) => {
+      // fuerza validación: decode → encode (lanza si es inválida)
+      return algosdk.encodeAddress(algosdk.decodeAddress(addrToString(addr)).publicKey);
+    };
+
+    const fromStr = canon(serverAcct.addr);
+    const toStr   = canon(to);
+
+    // --- Nota a partir del hash (hex)
+    if (!/^[0-9a-fA-F]+$/.test(hashHex) || (hashHex.length % 2 !== 0)) {
+      return res.status(400).json({ error: 'hashHex no es hex válido' });
+    }
+    const note = new Uint8Array(Buffer.from(hashHex, 'hex'));
+
+    // --- Sugeridos del nodo
+    const p = await algodClient.getTransactionParams().do();
+
+    // --- Construir txn (variante soportada en tu SDK)
     const txn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({
-      from: serverAcct.addr,
-      to,
-      amount: 0,         // 0 ALGO, solo nota
+      from: serverAcct.addr,     // <- STRING
+      to: to,         // <- STRING
+      amount: 0,         // 0 ALGO: solo nota
       note,
-      suggestedParams: params,
+      suggestedParams: p,
     });
 
+    // Firmar y enviar
     const signed = txn.signTxn(serverAcct.sk);
     const { txId } = await algodClient.sendRawTransaction(signed).do();
 
-    // Espera confirmación unos segundos (opcional)
-    const confirmed = await waitForConfirmation(algodClient, txId, 15);
-    res.json({
+    // Confirmación opcional
+    const confirmed = await waitForConfirmation(algodClient, txId, 15).catch(() => null);
+
+    return res.json({
+      ok: true,
       txId,
       round: confirmed ? confirmed['confirmed-round'] : null,
+      from: fromStr,
+      to: toStr,
     });
   } catch (e) {
-    console.error('anchorNote error', e);
-    res.status(500).json({ error: e?.message || String(e) });
+    console.error('anchorNote error:', e);
+    return res.status(500).json({ error: e?.message || String(e) });
   }
 });
+
 
 // ---------- BD: adjuntar txid/round a un certificado por hash ----------
 app.post('/api/certificados/attach-tx', express.json(), async (req, res) => {
@@ -382,6 +520,192 @@ app.post('/api/certificados/attach-tx', express.json(), async (req, res) => {
     res.json(result.rows[0]);
   } catch (e) {
     console.error('attach-tx error', e);
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+app.get('/api/algod/signer', (req, res) => {
+  const addr = toAddrString(serverAcct?.addr);
+  res.json({
+    configured: !!serverAcct && !!addr,
+    address: addr,
+  });
+});
+
+// Endpoint temporal para debug
+app.get('/api/debug/signer', (req, res) => {
+  res.json({
+    hasServerAcct: !!serverAcct,
+    hasSecretKey: !!serverAcct?.sk,
+    address: serverAcct?.addr || null,
+    addressIsValid: serverAcct?.addr ? algosdk.isValidAddress(serverAcct.addr) : false,
+    mnemonicConfigured: !!process.env.ALGOD_MNEMONIC,
+    mnemonicLength: process.env.ALGOD_MNEMONIC ? process.env.ALGOD_MNEMONIC.trim().split(/\s+/).length : 0
+  });
+});
+
+
+// ----- DESCARGAS
+// --- helpers ---
+const hexToBase64 = (hex) => Buffer.from(hex, 'hex').toString('base64');
+
+// --- 1) Buscar certificado por hash (en tu Postgres) ---
+app.get('/api/certificados/by-hash/:hash', async (req, res) => {
+  try {
+    const { hash } = req.params;
+    const r = await pool.query(
+      `SELECT id, wallet, nombre_archivo, hash, cid, txid, round, fecha
+         FROM certificados
+        WHERE hash = $1
+        LIMIT 1`,
+      [hash]
+    );
+    if (r.rowCount === 0) return res.status(404).json({ error: 'No existe ese hash' });
+    res.json(r.rows[0]);
+  } catch (e) {
+    console.error('by-hash error:', e);
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+// --- 2) Descargar el PDF EXACTO desde IPFS por hash ---
+app.get('/api/certificados/:hash/download', async (req, res) => {
+  try {
+    const { hash } = req.params;
+    const r = await pool.query(
+      `SELECT nombre_archivo, cid
+         FROM certificados
+        WHERE hash = $1
+        LIMIT 1`,
+      [hash]
+    );
+    if (r.rowCount === 0) return res.status(404).json({ error: 'No existe ese hash' });
+
+    const { nombre_archivo, cid } = r.rows[0];
+
+    // Cabeceras para descarga
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${(nombre_archivo || `documento-${hash.slice(0,8)}`).replace(/"/g,'')}.pdf"`
+    );
+
+    // Stream desde IPFS (ipfs.cat devuelve AsyncIterable<Uint8Array>)
+    for await (const chunk of ipfs.cat(cid)) {
+      res.write(chunk);
+    }
+    res.end();
+  } catch (e) {
+    console.error('download error:', e);
+    res.status(502).json({ error: 'No se pudo descargar desde IPFS' });
+  }
+});
+
+// --- (Opcional) HEAD lógico para chequear disponibilidad IPFS por hash ---
+app.get('/api/certificadosRedirect/:hash/download', async (req, res) => {
+  try {
+    const { hash } = req.params;
+    const head = String(req.query.head || '').trim() === '1';
+
+    const r = await pool.query(
+      `SELECT cid, nombre_archivo FROM certificados WHERE hash = $1 LIMIT 1`,
+      [hash]
+    );
+    if (r.rowCount === 0) return res.status(404).json({ error: 'No existe el hash' });
+
+    const { cid, nombre_archivo } = r.rows[0];
+    if (!cid) return res.status(404).json({ error: 'El certificado no tiene CID' });
+
+    if (head) {
+      // Respuesta rápida de "disponible"
+      return res.json({ ok: true, cid });
+    }
+
+    // Si ya tienes tu cliente IPFS (const ipfs = create({...})) puedes streamear:
+    // const stream = ipfs.cat(cid);
+    // res.setHeader('Content-Type', 'application/pdf');
+    // res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(nombre_archivo || 'certificado.pdf')}"`);
+    // for await (const chunk of stream) {
+    //   res.write(chunk);
+    // }
+    // return res.end();
+
+    // Si prefieres gateway interno/exterior, puedes proxy:
+    return res.redirect(`http://192.168.101.194:9095/ipfs/${cid}`); // ajusta a tu cluster/gateway
+  } catch (e) {
+    console.error('download error:', e);
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+// --- 3) Verificar on-chain usando un indexer público (Algonode) por hash ---
+app.get('/api/verify/hash/:hash', async (req, res) => {
+  try {
+    const { hash } = req.params;
+    if (!/^[0-9a-fA-F]+$/.test(hash) || hash.length % 2 !== 0) {
+      return res.status(400).json({ error: 'hash inválido' });
+    }
+    const b64 = hexToBase64(hash);
+
+    // Busca por note-prefix en el indexer público (MainNet)
+    const url = `https://mainnet-idx.algonode.cloud/v2/transactions?limit=1&note-prefix=${encodeURIComponent(b64)}`;
+    const r = await fetch(url);
+    if (!r.ok) {
+      return res.status(502).json({ error: 'Fallo indexer público', status: r.status });
+    }
+    const j = await r.json().catch(() => ({}));
+    const txs = j?.transactions || [];
+    const tx = txs[0];
+
+    const valid = !!tx;
+    res.json({
+      valid,
+      txId: tx?.id || null,
+      round: tx?.['confirmed-round'] || null,
+      from: tx?.sender || null,
+      // el "note" viene en base64; lo devolvemos para que puedas cotejar si quieres
+      noteB64: tx?.note || null,
+      // por conveniencia devolvemos el mismo hash consultado
+      hash
+    });
+  } catch (e) {
+    console.error('verify/hash error:', e);
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+
+// --- Buscar certificado por hash (BD) ---
+app.get('/api/certificados/by-hash/:hash', async (req, res) => {
+  try {
+    const { hash } = req.params;
+    const r = await pool.query(
+      `SELECT id, wallet, nombre_archivo, hash, cid, txid, round, fecha
+         FROM certificados
+        WHERE hash = $1
+        LIMIT 1`,
+      [hash]
+    );
+    if (r.rowCount === 0) {
+      return res.status(404).json({ error: 'No existe un certificado con ese hash' });
+    }
+    res.json(r.rows[0]);
+  } catch (e) {
+    console.error('by-hash error:', e);
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+// --- Obtener info de una transacción por txId (Algod) ---
+app.get('/api/algod/tx/:txId', async (req, res) => {
+  try {
+    const { txId } = req.params;
+    const info = await algodClient.pendingTransactionInformation(txId).do();
+    // Por si alguna lib mete BigInt en el futuro:
+    const safe = JSON.parse(JSON.stringify(info, (_, v) => (typeof v === 'bigint' ? Number(v) : v)));
+    res.json(safe);
+  } catch (e) {
+    console.error('tx-info error:', e);
     res.status(500).json({ error: e?.message || String(e) });
   }
 });
