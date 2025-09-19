@@ -10,27 +10,28 @@ import { AlertCircle, CheckCircle2, Upload, Link as LinkIcon, Download } from "l
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 
 // Helpers
-async function fileToArrayBuffer(file: File): Promise<ArrayBuffer> {
-  return await file.arrayBuffer()
-}
-
 async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
   const hash = await crypto.subtle.digest("SHA-256", bytes)
   const arr = Array.from(new Uint8Array(hash))
   return arr.map(b => b.toString(16).padStart(2, "0")).join("")
 }
 
-function b64ToBytes(b64: string): Uint8Array {
-  // atob en navegador
-  const bin = atob(b64)
-  const out = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
-  return out
+// Asegura padding del base64 (por si falta "==" al final)
+function fixBase64(s: string) {
+  let t = s.trim().replace(/\s+/g, "")
+  const pad = t.length % 4
+  if (pad) t = t + "=".repeat(4 - pad)
+  return t
 }
 
 export default function ValidatePage() {
   const [file, setFile] = useState<File | null>(null)
   const [busy, setBusy] = useState(false)
+
+  // Nuevos filtros opcionales
+  const [walletHint, setWalletHint] = useState("")
+  const [noteB64, setNoteB64] = useState("")
+  const [spanDays, setSpanDays] = useState<number>(3) // ventana ±3 días para /lookup-by-b64
 
   const [result, setResult] = useState<{
     valid: boolean
@@ -38,9 +39,9 @@ export default function ValidatePage() {
     details?: {
       filename?: string
       hashHex: string
-      wallet?: string
-      cid?: string
-      txId?: string
+      wallet?: string | null
+      cid?: string | null
+      txId?: string | null
       round?: number | null
       onchainNoteMatches?: boolean
       ipfsAvailable?: boolean
@@ -57,97 +58,92 @@ export default function ValidatePage() {
   const validateCertificate = async () => {
     if (!file) return
     setBusy(true)
-    setResult(null)
     try {
-      // 1) Hash del PDF
-      const bytes = await fileToArrayBuffer(file)
+      // 1) Calcular hash del PDF
+      const bytes = await file.arrayBuffer()
       const hashHex = await sha256Hex(bytes)
 
-      // 2) Buscar en BD por hash
-      const r1 = await fetch(`http://localhost:4000/api/certificados/by-hash/${hashHex}`)
-      if (!r1.ok) {
+      let data: any
+
+      // 2) Si el usuario pegó el noteB64 -> usar /lookup-by-b64 (rápido)
+      if (noteB64.trim()) {
+        const b64Fixed = encodeURIComponent(fixBase64(noteB64))
+        const resp = await fetch(
+          `http://localhost:4000/api/indexer/lookup-by-b64?b64=${b64Fixed}&spanDays=${spanDays}`
+        )
+        data = await resp.json()
+      } else {
+        // 3) Si NO hay noteB64 -> usar /lookup-by-hash, acotando (wallet/role/afterDays)
+        const u = new URL("http://localhost:4000/api/indexer/lookup-by-hash")
+        u.searchParams.set("hashHex", hashHex)
+        if (walletHint.trim()) {
+          u.searchParams.set("wallet", walletHint.trim())
+          u.searchParams.set("role", "receiver")
+          u.searchParams.set("afterDays", "30") // ventana razonable si conoces la wallet
+        } else {
+          u.searchParams.set("afterDays", "365") // fallback si no conoces wallet
+        }
+        const resp = await fetch(u.toString())
+        data = await resp.json()
+      }
+
+      if (!data?.found) {
         setResult({
           valid: false,
-          message: "El hash del PDF no está registrado en la base de datos.",
-          details: { hashHex }
+          message:
+            "No se encontró transacción con un note que empiece con ALGOCERT|v1|<hash> en la ventana indicada.",
+          details: {
+            filename: file.name,
+            hashHex,
+            wallet: null,
+            cid: null,
+            txId: null,
+            round: null,
+            onchainNoteMatches: false,
+            ipfsAvailable: false,
+          },
         })
-        setBusy(false)
         return
       }
-      const row = await r1.json() // {hash, cid, txid, wallet, round, ...}
 
-      // 3) Chequear IPFS (head lógico)
-      let ipfsAvailable = false
-      try {
-        const head = await fetch(`http://localhost:4000/api/certificados/${hashHex}/download?head=1`)
-        ipfsAvailable = head.ok
-      } catch {
-        ipfsAvailable = false
-      }
-
-      // 4) Si hay txId, verificar on-chain que la note == hashHex
-      let onchainNoteMatches = false
-      let round: number | null = row.round ?? null
-      if (row.txid) {
-        try {
-          const r2 = await fetch(`http://localhost:4000/api/algod/tx/${row.txid}`)
-          if (r2.ok) {
-            const txinfo = await r2.json()
-            // En Algorand la note viene base64 en txinfo.note
-            const noteB64 =
-              txinfo?.noteB64 ||
-              txinfo?.txn?.txn?.note ||
-              txinfo?.transaction?.note ||
-              txinfo?.note ||
-              null;
-
-            if (typeof noteB64 === "string" && noteB64.length > 0) {
-              const noteBytes = b64ToBytes(noteB64)
-              const noteHex = Array.from(noteBytes).map(b => b.toString(16).padStart(2, "0")).join("")
-              onchainNoteMatches = (noteHex.toLowerCase() === hashHex.toLowerCase())
-            }
-            // Confirmed round (si lo aporta el nodo)
-            round = typeof txinfo["confirmed-round"] === "number" ? txinfo["confirmed-round"] : round
-          }
-        } catch {
-          // ignoramos errores de red aquí
-        }
-      }
-
-      // 5) Componer resultado
-      const overallValid = !!row && (!!row.txid ? onchainNoteMatches : true)
+      const parsedHash = (data.parsed?.hash || "").toLowerCase()
+      const matches = parsedHash === hashHex.toLowerCase()
 
       setResult({
-        valid: overallValid,
-        message: overallValid
-          ? "El certificado coincide con el registro en BD y fue verificado en Algorand."
-          : (row.txid
-              ? "El certificado existe en BD, pero la nota on-chain no coincide con el hash del PDF."
-              : "El certificado existe en BD, pero no hay transacción asociada."),
+        valid: matches,
+        message: matches
+          ? "El hash del PDF coincide con la nota on-chain. Certificado verificado."
+          : "La nota on-chain no coincide con el hash calculado del PDF.",
         details: {
-          filename: row.nombre_archivo,
+          filename: file.name,
           hashHex,
-          wallet: row.wallet,
-          cid: row.cid,
-          txId: row.txid ?? undefined,
-          round: round ?? null,
-          ipfsAvailable,
-          onchainNoteMatches
-        }
+          wallet: data.parsed?.wallet || data.from || null,
+          cid: data.parsed?.cid || null,
+          txId: data.txId || null,
+          round: data.round ?? null,
+          onchainNoteMatches: matches,
+          ipfsAvailable: !!data.parsed?.cid,
+        },
       })
-    } catch (e: any) {
+    } catch (e) {
+      console.error(e)
       setResult({
         valid: false,
-        message: `Error durante la validación: ${e?.message || String(e)}`
+        message: "Error al validar el certificado.",
       })
     } finally {
       setBusy(false)
     }
   }
 
-  const descargarDesdeBackend = () => {
-    if (!result?.details?.hashHex) return
-    window.open(`http://localhost:4000/api/certificados/${result.details.hashHex}/download`, "_blank")
+  const abrirTxEnExplorer = () => {
+    const txId = result?.details?.txId
+    if (txId) window.open(`https://algoexplorer.io/tx/${txId}`, "_blank")
+  }
+
+  const abrirEnIPFS = () => {
+    const cid = result?.details?.cid
+    if (cid) window.open(`https://ipfs.io/ipfs/${cid}`, "_blank")
   }
 
   return (
@@ -159,7 +155,8 @@ export default function ValidatePage() {
           <CardHeader>
             <CardTitle>Sube tu certificado para validar</CardTitle>
             <CardDescription>
-              Verificaremos el PDF contra la base de datos (hash/IPFS) y la blockchain de Algorand (nota de la transacción).
+              Verificaremos el PDF calculando su hash y comparándolo con la nota on-chain (Algorand Indexer).
+              Si pegas el <strong>note en base64</strong> o indicas la <strong>wallet receptora</strong>, la búsqueda será más rápida.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -169,6 +166,45 @@ export default function ValidatePage() {
                 <div className="flex items-center gap-2">
                   <Input id="certificate" type="file" accept=".pdf" onChange={handleFileChange} />
                 </div>
+              </div>
+
+              {/* Campos opcionales para acotar la búsqueda */}
+              <div className="flex flex-col space-y-1.5">
+                <Label htmlFor="walletHint">Wallet (receptor, opcional)</Label>
+                <Input
+                  id="walletHint"
+                  placeholder="WF7545X4CNPWV2... (opcional)"
+                  value={walletHint}
+                  onChange={(e) => setWalletHint(e.target.value)}
+                />
+              </div>
+
+              <div className="flex flex-col space-y-1.5">
+                <Label htmlFor="noteB64">Note (base64, opcional)</Label>
+                <Input
+                  id="noteB64"
+                  placeholder="Pega el note en base64 si lo tienes"
+                  value={noteB64}
+                  onChange={(e) => setNoteB64(e.target.value)}
+                />
+                <div className="text-xs text-muted-foreground">
+                  Si pegas el note base64, se usará búsqueda por prefix exacto y ventana temporal para evitar timeouts.
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <Label htmlFor="spanDays" className="whitespace-nowrap">
+                  Ventana ±días
+                </Label>
+                <Input
+                  id="spanDays"
+                  type="number"
+                  min={1}
+                  max={30}
+                  className="w-24"
+                  value={spanDays}
+                  onChange={(e) => setSpanDays(Number(e.target.value) || 3)}
+                />
               </div>
             </div>
           </CardContent>
@@ -191,7 +227,7 @@ export default function ValidatePage() {
           <Card className="mt-8">
             <CardHeader>
               <CardTitle>Detalles verificados</CardTitle>
-              <CardDescription>Fuente: BD/IPFS + nodo Algorand</CardDescription>
+              <CardDescription>Fuente: Nota on-chain (Indexer) {result.details.cid ? "+ IPFS" : ""}</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="space-y-4 text-sm">
@@ -218,13 +254,13 @@ export default function ValidatePage() {
                   </div>
                   <div>
                     <p className="font-medium">TxID</p>
-                    <p className="text-muted-foreground break-all">
-                      {result.details.txId || "(sin transacción)"}
-                    </p>
+                    <p className="text-muted-foreground break-all">{result.details.txId || "(sin transacción)"}</p>
                   </div>
                   <div>
                     <p className="font-medium">Round confirmado</p>
-                    <p className="text-muted-foreground">{typeof result.details.round === "number" ? result.details.round : "(n/d)"}</p>
+                    <p className="text-muted-foreground">
+                      {typeof result.details.round === "number" ? result.details.round : "(n/d)"}
+                    </p>
                   </div>
                   <div>
                     <p className="font-medium">Note on-chain coincide</p>
@@ -234,24 +270,24 @@ export default function ValidatePage() {
 
                 <div className="flex flex-wrap items-center gap-2 pt-2">
                   {result.details.txId && (
-                    <a
-                      href={`https://algoexplorer.io/tx/${result.details.txId}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-2 text-blue-600 underline"
+                    <Button
+                      type="button"
+                      variant="link"
+                      className="p-0 h-auto inline-flex items-center gap-2"
+                      onClick={abrirTxEnExplorer}
                     >
-                      <LinkIcon className="w-4 h-4" /> Ver en AlgoExplorer (MainNet)
-                    </a>
+                      <LinkIcon className="w-4 h-4" /> Ver en AlgoExplorer
+                    </Button>
                   )}
-                  {result.details.hashHex && (
+                  {result.details.cid && (
                     <Button
                       type="button"
                       variant="secondary"
                       size="sm"
-                      onClick={descargarDesdeBackend}
+                      onClick={abrirEnIPFS}
                       className="inline-flex items-center gap-2"
                     >
-                      <Download className="w-4 h-4" /> Descargar PDF (IPFS/Backend)
+                      <Download className="w-4 h-4" /> Abrir en IPFS
                     </Button>
                   )}
                 </div>

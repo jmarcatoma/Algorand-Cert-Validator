@@ -18,8 +18,6 @@ import {
 
 import { Upload, X, Eye, Link as LinkIcon, Download } from 'lucide-react'
 
-// 🔥 IMPORT ELIMINADO:  import { set } from 'date-fns'
-
 const facultades = {
   "Facultad de Administración de Empresas": [
     { nombre: "Administración de Empresas", titulo: "Licenciado/a en Administración de Empresas" },
@@ -180,39 +178,30 @@ export default function TitleForm({ wallet }: { wallet: string | null }) {
         throw new Error(e || 'Error al subir el título')
       }
 
-      const data = await res.json()
-
-      const serverHash = data.hash as string;
+            // ... tras subir a IPFS:
+      const data = await res.json();
       setCidGenerado(data.cid ?? '');
-      setHashHexGenerado(serverHash);
       setShowSuccess(true);
-      toast.success('Título guardado (IPFS + BD)');
+      toast.success('Título guardado (IPFS + BD)'); // si luego quitas BD, deja el texto en "IPFS"
 
-      // 2) Anclar en Algorand (tx 0 ALGO con note = hashHex)
+      // 2) Anclar en Algorand (note con hash+cid+wallet)
       try {
         setAnchoring(true);
         const anchorRes = await fetch('http://localhost:4000/api/algod/anchorNote', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ to: wallet, hashHex: serverHash })
+          body: JSON.stringify({
+            to: wallet,
+            hashHex,
+            cid: data.cid,                         // importante
+            filename: `${nombre}_titulo.pdf`,      // opcional
+          }),
         });
-
         const ajson = await anchorRes.json().catch(() => ({}));
         if (anchorRes.ok && ajson.txId) {
           setTxId(ajson.txId);
           setRound(ajson.round ?? null);
           toast.success('Transacción enviada a Algorand');
-
-          // 3) Adjuntar tx/round a la fila usando el MISMO hash
-          try {
-            await fetch(`http://localhost:4000/api/certificados/${serverHash}/attach-tx`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ txId: ajson.txId, round: ajson.round ?? null })
-            });
-          } catch {
-            console.warn('No se pudo adjuntar tx/round (attach-tx)');
-          }
         } else {
           toast.error(ajson?.error || 'No se pudo anclar en Algorand');
         }
@@ -222,6 +211,7 @@ export default function TitleForm({ wallet }: { wallet: string | null }) {
       } finally {
         setAnchoring(false);
       }
+
     } catch (err) {
       console.error(err)
       toast.error('Error al subir el título')
@@ -313,16 +303,15 @@ export default function TitleForm({ wallet }: { wallet: string | null }) {
               <AlertDialogTitle>✅ Título subido con éxito</AlertDialogTitle>
               <AlertDialogDescription className="break-words space-y-3">
                 {cidGenerado && (
-                  <div>
-                    CID generado en IPFS:<br />
-                    <span className="font-mono">{cidGenerado}</span>
-                  </div>
-                )}
-
-                {hashHexGenerado && (
-                  <div>
-                    Hash (SHA-256):<br />
-                    <span className="font-mono">{hashHexGenerado}</span>
+                  <div className="mt-2">
+                    <a
+                      href={`https://ipfs.io/ipfs/${cidGenerado}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-2 text-blue-600 underline"
+                    >
+                      Descargar desde IPFS
+                    </a>
                   </div>
                 )}
 
