@@ -16,22 +16,9 @@ async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
   return arr.map(b => b.toString(16).padStart(2, "0")).join("")
 }
 
-// Asegura padding del base64 (por si falta "==" al final)
-function fixBase64(s: string) {
-  let t = s.trim().replace(/\s+/g, "")
-  const pad = t.length % 4
-  if (pad) t = t + "=".repeat(4 - pad)
-  return t
-}
-
 export default function ValidatePage() {
   const [file, setFile] = useState<File | null>(null)
   const [busy, setBusy] = useState(false)
-
-  // Nuevos filtros opcionales
-  const [walletHint, setWalletHint] = useState("")
-  const [noteB64, setNoteB64] = useState("")
-  const [spanDays, setSpanDays] = useState<number>(3) // ventana ±3 días para /lookup-by-b64
 
   const [result, setResult] = useState<{
     valid: boolean
@@ -41,10 +28,13 @@ export default function ValidatePage() {
       hashHex: string
       wallet?: string | null
       cid?: string | null
+      tipo?: string | null
+      nombre?: string | null
       txId?: string | null
       round?: number | null
       onchainNoteMatches?: boolean
       ipfsAvailable?: boolean
+      version?: "v1" | "v2" | string | null
     }
   } | null>(null)
 
@@ -63,66 +53,71 @@ export default function ValidatePage() {
       const bytes = await file.arrayBuffer()
       const hashHex = await sha256Hex(bytes)
 
-      let data: any
+      // 2) Backend: DB -> txId -> Indexer
+      const resp = await fetch(`http://localhost:4000/api/validate/hash/${hashHex}`)
+      const data = await resp.json()
 
-      // 2) Si el usuario pegó el noteB64 -> usar /lookup-by-b64 (rápido)
-      if (noteB64.trim()) {
-        const b64Fixed = encodeURIComponent(fixBase64(noteB64))
-        const resp = await fetch(
-          `http://localhost:4000/api/indexer/lookup-by-b64?b64=${b64Fixed}&spanDays=${spanDays}`
-        )
-        data = await resp.json()
-      } else {
-        // 3) Si NO hay noteB64 -> usar /lookup-by-hash, acotando (wallet/role/afterDays)
-        const u = new URL("http://localhost:4000/api/indexer/lookup-by-hash")
-        u.searchParams.set("hashHex", hashHex)
-        if (walletHint.trim()) {
-          u.searchParams.set("wallet", walletHint.trim())
-          u.searchParams.set("role", "receiver")
-          u.searchParams.set("afterDays", "30") // ventana razonable si conoces la wallet
-        } else {
-          u.searchParams.set("afterDays", "365") // fallback si no conoces wallet
-        }
-        const resp = await fetch(u.toString())
-        data = await resp.json()
-      }
-
-      if (!data?.found) {
+      if (!resp.ok) {
         setResult({
           valid: false,
-          message:
-            "No se encontró transacción con un note que empiece con ALGOCERT|v1|<hash> en la ventana indicada.",
+          message: data?.error || "Error de validación.",
           details: {
             filename: file.name,
             hashHex,
-            wallet: null,
-            cid: null,
-            txId: null,
-            round: null,
-            onchainNoteMatches: false,
-            ipfsAvailable: false,
           },
         })
         return
       }
 
-      const parsedHash = (data.parsed?.hash || "").toLowerCase()
-      const matches = parsedHash === hashHex.toLowerCase()
+      if (!data?.ok) {
+        // Casos: no está en BD / pendiente sin txId
+        const msg =
+          data?.pending
+            ? "El hash existe en BD pero aún no tiene txId asociado."
+            : (data?.error || "No se encontró información para este hash.")
+        setResult({
+          valid: false,
+          message: msg,
+          details: {
+            filename: file.name,
+            hashHex,
+            wallet: data?.db?.wallet || null,
+            cid: data?.db?.cid || null,
+            txId: data?.db?.txid || null,
+            round: data?.db?.round ?? null,
+            onchainNoteMatches: false,
+            ipfsAvailable: !!data?.db?.cid,
+            version: null,
+          },
+        })
+        return
+      }
+
+      // ok === true
+      const idx = data.indexer || {}
+      const parsed = idx.parsed || {}
+      const matches = !!data.matches
+
+      const wallet = parsed.wallet || data?.db?.wallet || idx.from || null
+      const cid = parsed.cid || data?.db?.cid || null
+      const txId = idx.txId || data?.db?.txid || null
+      const round = idx.round ?? data?.db?.round ?? null
 
       setResult({
         valid: matches,
-        message: matches
-          ? "El hash del PDF coincide con la nota on-chain. Certificado verificado."
-          : "La nota on-chain no coincide con el hash calculado del PDF.",
+        message: data.message || (matches ? "Certificado verificado." : "La nota on-chain no coincide con el hash."),
         details: {
           filename: file.name,
           hashHex,
-          wallet: data.parsed?.wallet || data.from || null,
-          cid: data.parsed?.cid || null,
-          txId: data.txId || null,
-          round: data.round ?? null,
+          wallet,
+          cid,
+          tipo: parsed.tipo || null,
+          nombre: parsed.nombre || null,
+          txId,
+          round,
           onchainNoteMatches: matches,
-          ipfsAvailable: !!data.parsed?.cid,
+          ipfsAvailable: !!cid,
+          version: parsed.version || null,
         },
       })
     } catch (e) {
@@ -155,8 +150,7 @@ export default function ValidatePage() {
           <CardHeader>
             <CardTitle>Sube tu certificado para validar</CardTitle>
             <CardDescription>
-              Verificaremos el PDF calculando su hash y comparándolo con la nota on-chain (Algorand Indexer).
-              Si pegas el <strong>note en base64</strong> o indicas la <strong>wallet receptora</strong>, la búsqueda será más rápida.
+              Calcularemos el hash del PDF y lo validaremos consultando la BD (para obtener el txId) y el indexador.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -166,45 +160,6 @@ export default function ValidatePage() {
                 <div className="flex items-center gap-2">
                   <Input id="certificate" type="file" accept=".pdf" onChange={handleFileChange} />
                 </div>
-              </div>
-
-              {/* Campos opcionales para acotar la búsqueda */}
-              <div className="flex flex-col space-y-1.5">
-                <Label htmlFor="walletHint">Wallet (receptor, opcional)</Label>
-                <Input
-                  id="walletHint"
-                  placeholder="WF7545X4CNPWV2... (opcional)"
-                  value={walletHint}
-                  onChange={(e) => setWalletHint(e.target.value)}
-                />
-              </div>
-
-              <div className="flex flex-col space-y-1.5">
-                <Label htmlFor="noteB64">Note (base64, opcional)</Label>
-                <Input
-                  id="noteB64"
-                  placeholder="Pega el note en base64 si lo tienes"
-                  value={noteB64}
-                  onChange={(e) => setNoteB64(e.target.value)}
-                />
-                <div className="text-xs text-muted-foreground">
-                  Si pegas el note base64, se usará búsqueda por prefix exacto y ventana temporal para evitar timeouts.
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <Label htmlFor="spanDays" className="whitespace-nowrap">
-                  Ventana ±días
-                </Label>
-                <Input
-                  id="spanDays"
-                  type="number"
-                  min={1}
-                  max={30}
-                  className="w-24"
-                  value={spanDays}
-                  onChange={(e) => setSpanDays(Number(e.target.value) || 3)}
-                />
               </div>
             </div>
           </CardContent>
@@ -227,7 +182,11 @@ export default function ValidatePage() {
           <Card className="mt-8">
             <CardHeader>
               <CardTitle>Detalles verificados</CardTitle>
-              <CardDescription>Fuente: Nota on-chain (Indexer) {result.details.cid ? "+ IPFS" : ""}</CardDescription>
+              <CardDescription>
+                Fuente: Nota on-chain (Indexer)
+                {result.details.cid ? " + IPFS" : ""}
+                {result.details.version ? ` • ${result.details.version}` : ""}
+              </CardDescription>
             </CardHeader>
             <CardContent>
               <div className="space-y-4 text-sm">
@@ -244,6 +203,22 @@ export default function ValidatePage() {
                     <p className="font-medium">Hash (SHA-256)</p>
                     <p className="text-muted-foreground font-mono break-all">{result.details.hashHex}</p>
                   </div>
+
+                  {/* v2 */}
+                  {result.details.tipo && (
+                    <div>
+                      <p className="font-medium">Tipo de certificado</p>
+                      <p className="text-muted-foreground break-words">{result.details.tipo}</p>
+                    </div>
+                  )}
+                  {result.details.nombre && (
+                    <div>
+                      <p className="font-medium">Nombre del certificado</p>
+                      <p className="text-muted-foreground break-words">{result.details.nombre}</p>
+                    </div>
+                  )}
+
+                  {/* v1 */}
                   <div>
                     <p className="font-medium">CID (IPFS)</p>
                     <p className="text-muted-foreground break-words">{result.details.cid || "(n/d)"}</p>
@@ -252,6 +227,7 @@ export default function ValidatePage() {
                     <p className="font-medium">IPFS disponible</p>
                     <p className="text-muted-foreground">{result.details.ipfsAvailable ? "Sí" : "No"}</p>
                   </div>
+
                   <div>
                     <p className="font-medium">TxID</p>
                     <p className="text-muted-foreground break-all">{result.details.txId || "(sin transacción)"}</p>

@@ -131,7 +131,6 @@ export default function TitleForm({ wallet }: { wallet: string | null }) {
     }
   }
 
-  // ✅ MOVER AQUÍ (fuera de subirTitulo): descargar original desde backend
   const descargarOriginal = async () => {
     try {
       const h = hashHexGenerado?.trim()
@@ -160,13 +159,14 @@ export default function TitleForm({ wallet }: { wallet: string | null }) {
       const hashBuffer = await crypto.subtle.digest('SHA-256', pdfBytes)
       const hashArray = Array.from(new Uint8Array(hashBuffer))
       const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
-      setHashHexGenerado(hashHex)
+      const hashHexLower = hashHex.toLowerCase()
+      setHashHexGenerado(hashHexLower)
 
       // 1) Guardar en backend (IPFS + BD)
       const formData = new FormData()
       formData.append('file', new Blob([pdfBytes], { type: 'application/pdf' }), `${nombre}_titulo.pdf`)
       formData.append('wallet', wallet)
-      formData.append('hash', hashHex)
+      formData.append('hash', hashHexLower)
 
       const res = await fetch('http://localhost:4000/guardar-titulo', { method: 'POST', body: formData })
       if (res.status === 409) {
@@ -178,38 +178,61 @@ export default function TitleForm({ wallet }: { wallet: string | null }) {
         throw new Error(e || 'Error al subir el título')
       }
 
-            // ... tras subir a IPFS:
-      const data = await res.json();
-      setCidGenerado(data.cid ?? '');
-      setShowSuccess(true);
-      toast.success('Título guardado (IPFS + BD)'); // si luego quitas BD, deja el texto en "IPFS"
+      const data = await res.json()
+      setCidGenerado(data.cid ?? '')
+      setShowSuccess(true)
+      toast.success('Título guardado (IPFS + BD)')
 
-      // 2) Anclar en Algorand (note con hash+cid+wallet)
+      // 2) Anclar en Algorand (v1: hash + cid + wallet + ts)
       try {
-        setAnchoring(true);
+        setAnchoring(true)
         const anchorRes = await fetch('http://localhost:4000/api/algod/anchorNote', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             to: wallet,
-            hashHex,
-            cid: data.cid,                         // importante
-            filename: `${nombre}_titulo.pdf`,      // opcional
+            hashHex: hashHexLower,
+            cid: data.cid,                    // importante
+            filename: `${nombre}_titulo.pdf`, // opcional
           }),
-        });
-        const ajson = await anchorRes.json().catch(() => ({}));
+        })
+        const ajson = await anchorRes.json().catch(() => ({} as any))
+
         if (anchorRes.ok && ajson.txId) {
-          setTxId(ajson.txId);
-          setRound(ajson.round ?? null);
-          toast.success('Transacción enviada a Algorand');
+          setTxId(ajson.txId)
+          setRound(ajson.round ?? null)
+          toast.success('Transacción enviada a Algorand')
+
+          // 3) ✅ Adjuntar txId/round en la BD por hash
+          try {
+            const attachRes = await fetch(`http://localhost:4000/api/certificados/${hashHexLower}/attach-tx`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                txId: ajson.txId,
+                round: ajson.round ?? null,
+              }),
+            })
+            if (attachRes.ok) {
+              const attachJson = await attachRes.json().catch(() => ({}))
+              console.log('[attach-tx] OK', attachJson)
+            } else {
+              const errTxt = await attachRes.text().catch(() => '')
+              console.warn('[attach-tx] NO OK', errTxt)
+              toast.warning('No se pudo adjuntar tx en la BD (revisar servidor)')
+            }
+          } catch (e) {
+            console.warn('[attach-tx] error de red', e)
+            toast.warning('No se pudo adjuntar tx en la BD (red)')
+          }
         } else {
-          toast.error(ajson?.error || 'No se pudo anclar en Algorand');
+          toast.error(ajson?.error || 'No se pudo anclar en Algorand')
         }
       } catch (err) {
-        console.error('anchor error', err);
-        toast.error('Error de red al anclar en Algorand');
+        console.error('anchor error', err)
+        toast.error('Error de red al anclar en Algorand')
       } finally {
-        setAnchoring(false);
+        setAnchoring(false)
       }
 
     } catch (err) {
@@ -228,6 +251,7 @@ export default function TitleForm({ wallet }: { wallet: string | null }) {
 
         <CardContent className="grid gap-4">
           <Input placeholder="Nombre del Estudiante" value={nombre} onChange={e => setNombre(e.target.value)} />
+
           <Select value={facultad} onValueChange={setFacultad}>
             <SelectTrigger><SelectValue placeholder="Seleccione una facultad" /></SelectTrigger>
             <SelectContent>
@@ -253,7 +277,6 @@ export default function TitleForm({ wallet }: { wallet: string | null }) {
           <Input placeholder="Refrendado" value={refrendado} onChange={e => setRefrendado(e.target.value)} type="number" />
           <Input type="date" value={fecha} onChange={e => setFecha(e.target.value)} />
 
-          {/* Info post-acción */}
           {hashHexGenerado && (
             <div className="text-sm text-muted-foreground break-words">
               <div><span className="font-semibold">Hash (SHA-256):</span> <span className="font-mono">{hashHexGenerado}</span></div>
@@ -272,7 +295,6 @@ export default function TitleForm({ wallet }: { wallet: string | null }) {
                 <div>Round confirmado: <span className="font-mono">{round}</span></div>
               )}
               <div className="flex flex-wrap items-center gap-2 mt-1">
-                {/* 🚀 NUEVO BOTÓN: Descargar PDF */}
                 <Button
                   type="button"
                   variant="secondary"

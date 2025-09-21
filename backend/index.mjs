@@ -11,33 +11,69 @@ import algosdk from 'algosdk';
 
 dotenv.config();
 
-// Convierte cualquier "address-like" en string base32 (WF...)
-// Soporta: string, {publicKey: Uint8Array|obj}, {addr:string}
-// Reemplaza tu función toAddrString con esta versión mejorada
+// --- Helpers tiempo (Ecuador UTC-5) ---
+function toEcuadorLocal(ms) {
+  if (ms == null) return null;
+  try {
+    return new Intl.DateTimeFormat('es-EC', {
+      timeZone: 'America/Guayaquil',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hour12: false
+    }).format(new Date(ms));
+  } catch {
+    return new Date(ms).toISOString();
+  }
+}
+
+
+
+// -------------------- NOTE parser (v1 y v2) --------------------
+function parseAlgocertNote(noteUtf8, fallbackWallet = null) {
+  if (!noteUtf8 || !noteUtf8.startsWith('ALGOCERT|')) return null;
+  const p = noteUtf8.split('|');
+  const version = p[1];
+  const out = {
+    version,
+    hash: (p[2] || '').toLowerCase(),
+    // v1
+    cid: null,
+    // v2
+    tipo: null,
+    nombre: null,
+    // comunes
+    wallet: fallbackWallet || null,
+    ts: null,
+  };
+  if (version === 'v1') { // ALGOCERT|v1|hash|cid|wallet|ts
+    out.cid    = p[3] || null;
+    out.wallet = p[4] || fallbackWallet || null;
+    out.ts     = p[5] ? Number(p[5]) : null;
+  } else if (version === 'v2') { // ALGOCERT|v2|hash|tipo|nombre|wallet|ts
+    out.tipo   = p[3] || null;
+    out.nombre = p[4] || null;
+    out.wallet = p[5] || fallbackWallet || null;
+    out.ts     = p[6] ? Number(p[6]) : null;
+  }
+  return out;
+}
+
+// ------------------ Address helper (intacto) -------------------
 const toAddrString = (addrLike) => {
   if (!addrLike) return null;
-  
-  // Caso 1: Ya es un string válido
   if (typeof addrLike === 'string') {
     const cleaned = addrLike.trim();
     return algosdk.isValidAddress(cleaned) ? cleaned : null;
   }
-
-  // Caso 2: Objeto con propiedad addr (string)
   if (addrLike.addr && typeof addrLike.addr === 'string') {
     const cleaned = addrLike.addr.trim();
     return algosdk.isValidAddress(cleaned) ? cleaned : null;
   }
-
-  // Caso 3: Objeto con publicKey (como en tu caso)
   if (addrLike.publicKey) {
     try {
-      // Convertir objeto indexado a Uint8Array si es necesario
       const publicKeyBytes = addrLike.publicKey instanceof Uint8Array
         ? addrLike.publicKey
         : new Uint8Array(Object.values(addrLike.publicKey));
-      
-      // Validar que tenga 32 bytes
       if (publicKeyBytes.length === 32) {
         const addr = algosdk.encodeAddress(publicKeyBytes);
         return algosdk.isValidAddress(addr) ? addr : null;
@@ -47,8 +83,6 @@ const toAddrString = (addrLike) => {
       return null;
     }
   }
-
-  // Caso 4: Directamente es un Uint8Array de 32 bytes (clave pública)
   if (addrLike instanceof Uint8Array && addrLike.length === 32) {
     try {
       const addr = algosdk.encodeAddress(addrLike);
@@ -58,7 +92,6 @@ const toAddrString = (addrLike) => {
       return null;
     }
   }
-
   return null;
 };
 
@@ -68,8 +101,7 @@ const IDX_CHAIN = (process.env.INDEXER_URLS || (process.env.INDEXER_URL || 'http
   .map(s => s.trim())
   .filter(Boolean);
 
-
-  function buildIdxUrl(base, { b64prefix, wallet, role, limit, afterIso, beforeIso }) {
+function buildIdxUrl(base, { b64prefix, wallet, role, limit, afterIso, beforeIso }) {
   const qs = new URLSearchParams();
   qs.set('note-prefix', b64prefix);
   qs.set('tx-type', 'pay');
@@ -132,39 +164,26 @@ if (MNEMONIC) {
   try {
     const m = (process.env.ALGOD_MNEMONIC || '').trim();
     const words = m.split(/\s+/).filter(Boolean);
-    
     console.log(`[DEBUG] Mnemonic words count: ${words.length}`);
-    
     if (words.length !== 25) {
       console.warn(`[Signer] ALGOD_MNEMONIC inválido: ${words.length} palabras (deben ser 25)`);
     } else {
       const account = algosdk.mnemonicToSecretKey(words.join(' '));
-      
-      // Log para debug
       console.log('[DEBUG] Account from mnemonic:', {
         hasAddr: !!account.addr,
         addrType: typeof account.addr,
         addr: account.addr,
         hasSecretKey: !!account.sk
       });
-      
-      // Asegurar que addr sea un string válido
       if (typeof account.addr === 'string' && algosdk.isValidAddress(account.addr)) {
         serverAcct = account;
         console.log(`[Signer] ✅ Cuenta cargada correctamente: ${serverAcct.addr}`);
       } else {
-        // Si addr no es string, intentar convertir desde publicKey
         console.warn('[Signer] addr no es string válido, intentando generar desde publicKey...');
-        
         if (account.sk && account.sk.length >= 32) {
-          // Extraer la clave pública de los primeros 32 bytes de sk
           const publicKey = account.sk.slice(32, 64);
           const addr = algosdk.encodeAddress(publicKey);
-          
-          serverAcct = {
-            addr: addr,
-            sk: account.sk
-          };
+          serverAcct = { addr, sk: account.sk };
           console.log(`[Signer] ✅ Dirección regenerada: ${serverAcct.addr}`);
         } else {
           console.error('[Signer] No se pudo generar dirección válida');
@@ -311,7 +330,6 @@ app.get('/api/indexer/health', async (_req, res) => {
   }
 });
 
-
 // ---------- IPFS ----------
 const ipfs = create({ url: 'http://192.168.101.194:9095/api/v0' });
 
@@ -394,9 +412,8 @@ app.post('/guardar-titulo', upload.single('file'), async (req, res) => {
   }
 });
 
-
 // ---------- ALGOD: salud ----------
-app. get('/api/algod/health', async (req, res) => {
+app.get('/api/algod/health', async (req, res) => {
   try {
     await algodClient.healthCheck().do();
     res.json({ ok: true });
@@ -406,7 +423,7 @@ app. get('/api/algod/health', async (req, res) => {
   }
 });
 
-// ---------- ALGOD: status (útil para ver sync/catchup) ----------
+// ---------- ALGOD: status ----------
 app.get('/api/algod/status', async (_req, res) => {
   try {
     const st = await algodClient.status().do();
@@ -421,8 +438,6 @@ app.get('/api/algod/status', async (_req, res) => {
   }
 });
 
-
-
 // ---------- ALGOD: suggested params ----------
 app.get('/api/algod/params', async (_req, res) => {
   try {
@@ -433,7 +448,6 @@ app.get('/api/algod/params', async (_req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-
 
 // ---------- ALGOD: enviar TX firmada (raw base64) ----------
 app.post('/api/algod/sendRaw', async (req, res) => {
@@ -450,7 +464,6 @@ app.post('/api/algod/sendRaw', async (req, res) => {
 
 // ---------- INDEXER: placeholder ----------
 app.get('/api/indexer/verify', (_req, res) => {
-  // Lo activaremos cuando montemos Indexer V2.
   return res.status(501).json({ error: 'Indexer no configurado en el backend' });
 });
 
@@ -482,7 +495,6 @@ app.get('/api/tx/:txId/status', async (req, res) => {
   try {
     const { txId } = req.params;
     const info = await algodClient.pendingTransactionInformation(txId).do();
-    // confirmed-round presente si ya fue confirmada
     res.json({
       txId,
       confirmedRound: info['confirmed-round'] ?? null,
@@ -493,8 +505,7 @@ app.get('/api/tx/:txId/status', async (req, res) => {
   }
 });
 
-
-// ---------- Anclar usando note: ALGOCERT|v1|<hash>|<cid>|<wallet>|<ts> ----------
+// ---------- Anclar usando note v1 ----------
 app.post('/api/algod/anchorNote', express.json(), async (req, res) => {
   try {
     if (!serverAcct) {
@@ -517,7 +528,6 @@ app.post('/api/algod/anchorNote', express.json(), async (req, res) => {
       return res.status(400).json({ error: 'cid requerido' });
     }
 
-    // Nota fija y buscable por prefijo (permite validar solo con PDF)
     const noteStr = `ALGOCERT|v1|${hashHex}|${cid}|${to}|${Date.now()}`;
     const note = new Uint8Array(Buffer.from(noteStr, 'utf8'));
 
@@ -531,7 +541,7 @@ app.post('/api/algod/anchorNote', express.json(), async (req, res) => {
     const txn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({
       from: serverAcct.addr,
       to,
-      amount: 0,          // 0 ALGO: sólo nota
+      amount: 0,
       note,
       suggestedParams: sp,
     });
@@ -539,11 +549,27 @@ app.post('/api/algod/anchorNote', express.json(), async (req, res) => {
     const signed = txn.signTxn(serverAcct.sk);
     const { txId } = await algodClient.sendRawTransaction(signed).do();
     const confirmed = await waitForConfirmation(algodClient, txId, 12).catch(() => null);
+    const round = confirmed ? confirmed['confirmed-round'] : null;
+
+    // ✅ intento de adjuntar a BD automáticamente (no falla el endpoint si no existe el hash aún)
+    let dbAttached = false;
+    try {
+      const q = `
+        UPDATE certificados
+           SET txid = $1, round = COALESCE($2, round)
+         WHERE hash = $3
+      `;
+      const r = await pool.query(q, [txId, round ?? null, hashHex]);
+      dbAttached = r.rowCount > 0;
+    } catch (e) {
+      console.warn('[anchorNote] attach DB opcional falló:', e?.message || e);
+    }
 
     return res.json({
       ok: true,
       txId,
-      round: confirmed ? confirmed['confirmed-round'] : null,
+      round,
+      dbAttached,
       notePreview: noteStr.slice(0, 120),
     });
   } catch (e) {
@@ -552,7 +578,92 @@ app.post('/api/algod/anchorNote', express.json(), async (req, res) => {
   }
 });
 
-// ---------- BD: adjuntar txid/round a un certificado por hash ----------
+
+
+// ---------- Anclar usando note v2: ALGOCERT|v2|<hash>|<tipo>|<nombre>|<wallet>|<ts> ----------
+app.post('/api/algod/anchorNoteUpload', express.json(), async (req, res) => {
+  try {
+    if (!serverAcct) {
+      return res.status(501).json({ error: 'Server signer no configurado' });
+    }
+
+    let { to, hashHex, tipo, nombreCert, filename } = req.body || {};
+    to         = String(to || '').trim();
+    hashHex    = String(hashHex || '').trim().toLowerCase();
+    tipo       = String(tipo || '').trim();
+    nombreCert = String(nombreCert || '').trim();
+    filename   = (String(filename || '').trim()).slice(0, 128);
+
+    if (!algosdk.isValidAddress(to)) {
+      return res.status(400).json({ error: `to inválido: ${to}` });
+    }
+    if (!/^[0-9a-f]{64}$/.test(hashHex)) {
+      return res.status(400).json({ error: 'hashHex inválido (64 hex chars)' });
+    }
+    if (!tipo) {
+      return res.status(400).json({ error: 'tipo requerido' });
+    }
+    if (!nombreCert) {
+      return res.status(400).json({ error: 'nombreCert requerido' });
+    }
+
+    // Saneo básico para evitar pipes y limitar tamaño de campos
+    const clean = (s, max = 160) => s.replace(/\|/g, ' ').slice(0, max);
+
+    // Nota v2 (sin CID): tipo + nombre en texto
+    const noteStr = `ALGOCERT|v2|${hashHex}|${clean(tipo, 64)}|${clean(nombreCert, 160)}|${to}|${Date.now()}`;
+    const note = new Uint8Array(Buffer.from(noteStr, 'utf8'));
+
+    // Params y TX 0 ALGO
+    const raw = await algodClient.getTransactionParams().do();
+    const sp = {
+      ...raw,
+      flatFee: true,
+      fee: Number(raw.minFee || raw.fee || 1000),
+    };
+
+    const txn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({
+      from: serverAcct.addr,
+      to,
+      amount: 0,
+      note,
+      suggestedParams: sp,
+    });
+
+    const signed = txn.signTxn(serverAcct.sk);
+    const { txId } = await algodClient.sendRawTransaction(signed).do();
+    const confirmed = await waitForConfirmation(algodClient, txId, 12).catch(() => null);
+    const round = confirmed ? confirmed['confirmed-round'] : null;
+
+    // ✅ Intenta adjuntar en BD por hash (opcional, no rompe si no existe)
+    let dbAttached = false;
+    try {
+      const q = `
+        UPDATE certificados
+           SET txid = $1, round = COALESCE($2, round)
+         WHERE hash = $3
+      `;
+      const r = await pool.query(q, [txId, round ?? null, hashHex]);
+      dbAttached = r.rowCount > 0;
+    } catch (e) {
+      console.warn('[anchorNoteUpload] attach DB opcional falló:', e?.message || e);
+    }
+
+    return res.json({
+      ok: true,
+      txId,
+      round,
+      dbAttached,
+      notePreview: noteStr.slice(0, 200),
+    });
+  } catch (e) {
+    console.error('anchorNoteUpload error:', e);
+    return res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+
+// ---------- BD: adjuntar txid/round (cuerpo con hash) ----------
 app.post('/api/certificados/attach-tx', express.json(), async (req, res) => {
   const { hash, txid, round } = req.body || {};
   if (!hash || !txid) return res.status(400).json({ error: 'Faltan hash o txid' });
@@ -592,13 +703,10 @@ app.get('/api/debug/signer', (req, res) => {
   });
 });
 
-
 // ----- DESCARGAS
-// --- helpers ---
 const hexToBase64 = (hex) => Buffer.from(hex, 'hex').toString('base64');
 
-
-// --- 2) Descargar el PDF EXACTO desde IPFS por hash ---
+// --- Descargar el PDF EXACTO desde IPFS por hash ---
 app.get('/api/certificados/:hash/download', async (req, res) => {
   try {
     const { hash } = req.params;
@@ -613,14 +721,12 @@ app.get('/api/certificados/:hash/download', async (req, res) => {
 
     const { nombre_archivo, cid } = r.rows[0];
 
-    // Cabeceras para descarga
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader(
       'Content-Disposition',
       `attachment; filename="${(nombre_archivo || `documento-${hash.slice(0,8)}`).replace(/"/g,'')}.pdf"`
     );
 
-    // Stream desde IPFS (ipfs.cat devuelve AsyncIterable<Uint8Array>)
     for await (const chunk of ipfs.cat(cid)) {
       res.write(chunk);
     }
@@ -631,7 +737,7 @@ app.get('/api/certificados/:hash/download', async (req, res) => {
   }
 });
 
-// --- (Opcional) HEAD lógico para chequear disponibilidad IPFS por hash ---
+// --- HEAD lógico / redirect IPFS ---
 app.get('/api/certificadosRedirect/:hash/download', async (req, res) => {
   try {
     const { hash } = req.params;
@@ -643,15 +749,13 @@ app.get('/api/certificadosRedirect/:hash/download', async (req, res) => {
     );
     if (r.rowCount === 0) return res.status(404).json({ error: 'No existe el hash' });
 
-    const { cid, nombre_archivo } = r.rows[0];
+    const { cid } = r.rows[0];
     if (!cid) return res.status(404).json({ error: 'El certificado no tiene CID' });
 
     if (head) {
-      // Respuesta rápida de "disponible"
       return res.json({ ok: true, cid });
     }
 
-    // Si prefieres gateway interno/exterior, puedes proxy:
     return res.redirect(`http://192.168.101.194:9095/ipfs/${cid}`);
   } catch (e) {
     console.error('download error:', e);
@@ -680,12 +784,11 @@ app.get('/api/certificados/by-hash/:hash', async (req, res) => {
   }
 });
 
-// --- Obtener info de una transacción por txId (Algod) ---
+// --- Obtener info de una transacción por txId (Algod pending “raw”) ---
 app.get('/api/algod/tx/:txId', async (req, res) => {
   try {
     const { txId } = req.params;
     const info = await algodClient.pendingTransactionInformation(txId).do();
-    // Por si alguna lib mete BigInt en el futuro:
     const safe = JSON.parse(JSON.stringify(info, (_, v) => (typeof v === 'bigint' ? Number(v) : v)));
     res.json(safe);
   } catch (e) {
@@ -694,16 +797,137 @@ app.get('/api/algod/tx/:txId', async (req, res) => {
   }
 });
 
+// ---------- Lookup transacción por txId (Indexer + parse NOTE) ----------
+app.get('/api/indexer/tx/:txId', async (req, res) => {
+  const { txId } = req.params;
+  try {
+    // 1) Indexer SDK
+    try {
+      const r = await indexerClient.lookupTransactionByID(txId).do();
+      const tx = r?.transaction || null;
+      if (tx) {
+        const noteB64 = tx.note || null;
+        const noteUtf8 = noteB64 ? Buffer.from(noteB64, 'base64').toString('utf8') : null;
+        return res.json({
+          ok: true,
+          txId,
+          round: tx['confirmed-round'] ?? null,
+          from: tx.sender ?? null,
+          to: tx['payment-transaction']?.receiver ?? null,
+          noteB64,
+          noteUtf8,
+          parsed: parseAlgocertNote(noteUtf8, tx.sender ?? null),
+          provider: 'indexer',
+        });
+      }
+    } catch (e) {
+      // 2) REST
+      try {
+        const url = `${INDEXER_URL.replace(/\/+$/, '')}/v2/transactions/${txId}`;
+        const r = await fetch(url);
+        if (!r.ok) throw new Error(`Indexer REST ${r.status}`);
+        const j = await r.json();
+        const tx = j?.transaction || null;
+        if (tx) {
+          const noteB64 = tx.note || null;
+          const noteUtf8 = noteB64 ? Buffer.from(noteB64, 'base64').toString('utf8') : null;
+          return res.json({
+            ok: true,
+            txId,
+            round: tx['confirmed-round'] ?? null,
+            from: tx.sender ?? null,
+            to: tx['payment-transaction']?.receiver ?? null,
+            noteB64,
+            noteUtf8,
+            parsed: parseAlgocertNote(noteUtf8, tx.sender ?? null),
+            provider: 'indexer-rest',
+          });
+        }
+      } catch (e2) {
+        // 3) ALGOD pending (muy reciente)
+        try {
+          const info = await algodClient.pendingTransactionInformation(txId).do();
+          const noteB64 = info?.txn?.txn?.note || null;
+          const noteUtf8 = noteB64 ? Buffer.from(noteB64, 'base64').toString('utf8') : null;
+          return res.json({
+            ok: true,
+            txId,
+            round: info['confirmed-round'] ?? null,
+            from: info?.sender ?? null,
+            to: info?.['payment-transaction']?.receiver ?? null,
+            noteB64,
+            noteUtf8,
+            parsed: parseAlgocertNote(noteUtf8, info?.sender ?? null),
+            provider: 'algod-pending',
+          });
+        } catch (e3) {
+          throw e2;
+        }
+      }
+    }
+    return res.status(404).json({ ok: false, error: 'Transacción no encontrada' });
+  } catch (e) {
+    console.error('lookup tx by id error:', e);
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
 
+// ---------- Validación directa por HASH (DB → TX → NOTE) ----------
+app.get('/api/validate/hash/:hash', async (req, res) => {
+  try {
+    const hash = (req.params.hash || '').toLowerCase().trim();
+    if (!/^[0-9a-f]{64}$/.test(hash)) return res.status(400).json({ error: 'hash inválido (64 hex chars)' });
 
-// ---------- Buscar transacción por prefix: ALGOCERT|v1|<hashHex>| (acotado por HORAS y .env + fallback REST) ----------
+    const r = await pool.query(
+      `SELECT id, wallet, nombre_archivo, hash, cid, txid, round, fecha
+         FROM certificados
+        WHERE hash = $1
+        LIMIT 1`,
+      [hash]
+    );
+    if (r.rowCount === 0) {
+      return res.status(404).json({ ok: false, error: 'Hash no encontrado en BD' });
+    }
+
+    const row = r.rows[0];
+    if (!row.txid) {
+      return res.json({
+        ok: false,
+        pending: true,
+        message: 'El hash existe en BD pero aún no tiene txId asociado.',
+        db: row,
+      });
+    }
+
+    const url = `${req.protocol}://${req.get('host')}/api/indexer/tx/${row.txid}`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+
+    const parsedHash = (data?.parsed?.hash || '').toLowerCase();
+    const matches = parsedHash === hash;
+
+    return res.json({
+      ok: true,
+      matches,
+      message: matches
+        ? 'El hash coincide con la nota on-chain.'
+        : 'La nota on-chain no coincide con el hash.',
+      db: row,
+      indexer: data,
+    });
+  } catch (e) {
+    console.error('validate/hash error:', e);
+    res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+// ---------- Lookup por HASH (v2 y v1; SDK→REST) ----------
 app.get('/api/indexer/lookup-by-hash', async (req, res) => {
   try {
     const hashHex = String(req.query.hashHex || '').trim().toLowerCase();
     const wallet  = String(req.query.wallet  || '').trim();
     const role    = String(req.query.role    || '').trim(); // 'receiver' | 'sender' opcional
 
-    // Overrides por query (opcionales); si no vienen, usamos .env
     const afterHours = req.query.afterHours != null
       ? Math.max(1, Number(req.query.afterHours))
       : IDX_LOOKBACK_HOURS;
@@ -716,126 +940,116 @@ app.get('/api/indexer/lookup-by-hash', async (req, res) => {
       return res.status(400).json({ error: 'hashHex inválido (64 hex chars)' });
     }
 
-    // Prefijo ESTRICTO con pipe final (para reducir el set de búsqueda)
-    const prefixUtf8 = `ALGOCERT|v1|${hashHex}|`;
-    const notePrefixBytes = new Uint8Array(Buffer.from(prefixUtf8, 'utf8')); // SDK
-    const prefixB64 = Buffer.from(prefixUtf8, 'utf8').toString('base64');    // REST
-
-    // Ventana temporal basada SOLO en horas (de .env o query)
     const now = Date.now();
     const afterIso  = new Date(now - afterHours * 3600e3).toISOString();
     const beforeIso = new Date(now + aheadHours * 3600e3).toISOString();
 
-    // ---------- 1) Intento con SDK (acotado) ----------
-    try {
-      let q = indexerClient
-        .searchForTransactions()
-        .notePrefix(notePrefixBytes)
-        .txType('pay')
-        .afterTime(afterIso)
-        .beforeTime(beforeIso)
-        .limit(10);
+    const tryVersion = async (ver) => {
+      const prefixUtf8 = `ALGOCERT|${ver}|${hashHex}|`; // pipe final
+      const notePrefixBytes = new Uint8Array(Buffer.from(prefixUtf8, 'utf8')); // SDK
+      const prefixB64 = Buffer.from(prefixUtf8, 'utf8').toString('base64');    // REST
 
-      if (algosdk.isValidAddress(wallet)) {
-        q = q.address(wallet);
-        if (role === 'receiver' || role === 'sender') q = q.addressRole(role);
-      }
+      // 1) SDK
+      try {
+        let q = indexerClient
+          .searchForTransactions()
+          .notePrefix(notePrefixBytes)
+          .txType('pay')
+          .afterTime(afterIso)
+          .beforeTime(beforeIso)
+          .limit(10);
 
-      const resp = await q.do();
-      const txs = resp.transactions || [];
-      if (txs.length > 0) {
-        txs.sort((a, b) => (b['confirmed-round'] || 0) - (a['confirmed-round'] || 0));
-        const tx = txs[0];
-
-        const noteB64 = tx.note || null;
-        const noteUtf8 = noteB64 ? Buffer.from(noteB64, 'base64').toString('utf8') : null;
-
-        let parsed = null;
-        if (noteUtf8 && noteUtf8.startsWith('ALGOCERT|v1|')) {
-          const parts = noteUtf8.split('|'); // ALGOCERT|v1|<hash>|<cid>|<wallet>|<ts>
-          parsed = {
-            hash: (parts[2] || '').toLowerCase(),
-            cid: parts[3] || null,
-            wallet: parts[4] || tx.sender || null,
-            ts: parts[5] ? Number(parts[5]) : null,
-          };
+        if (algosdk.isValidAddress(wallet)) {
+          q = q.address(wallet);
+          if (role === 'receiver' || role === 'sender') q = q.addressRole(role);
         }
 
-        return res.json({
-          found: true,
-          txId: tx.id,
-          round: tx['confirmed-round'] || null,
-          from: tx.sender,
-          to: tx['payment-transaction']?.receiver || null,
-          noteUtf8,
-          parsed,
-          provider: 'sdk',
-          afterIso,
-          beforeIso,
-          hours: { afterHours, aheadHours }
-        });
-      }
-    } catch (sdkErr) {
-      console.warn('[Indexer SDK] timeout/500, probando fallback REST…', sdkErr?.message || sdkErr);
-    }
-
-    // ---------- 2) Fallback REST directo contra INDEXER_URL ----------
-    try {
-      const url = new URL(`${INDEXER_URL.replace(/\/+$/,'')}/v2/transactions`);
-      url.searchParams.set('note-prefix', prefixB64);
-      url.searchParams.set('tx-type', 'pay');
-      url.searchParams.set('after-time', afterIso);
-      url.searchParams.set('before-time', beforeIso);
-      url.searchParams.set('limit', '10');
-      if (algosdk.isValidAddress(wallet)) {
-        url.searchParams.set('address', wallet);
-        if (role === 'receiver' || role === 'sender') url.searchParams.set('address-role', role);
+        const resp = await q.do();
+        const txs = resp.transactions || [];
+        if (txs.length > 0) {
+          txs.sort((a, b) => (b['confirmed-round'] || 0) - (a['confirmed-round'] || 0));
+          const tx = txs[0];
+          const noteB64 = tx.note || null;
+          const noteUtf8 = noteB64 ? Buffer.from(noteB64, 'base64').toString('utf8') : null;
+          const parsed = parseAlgocertNote(noteUtf8, tx.sender || null);
+          if (parsed) {
+            return {
+              found: true,
+              txId: tx.id,
+              round: tx['confirmed-round'] || null,
+              from: tx.sender,
+              to: tx['payment-transaction']?.receiver || null,
+              noteUtf8,
+              parsed,
+              provider: 'sdk',
+              afterIso,
+              beforeIso,
+              hours: { afterHours, aheadHours }
+            };
+          }
+        }
+      } catch (sdkErr) {
+        console.warn('[Indexer SDK] timeout/500, probando fallback REST…', sdkErr?.message || sdkErr);
       }
 
-      const r = await fetch(url.toString());
-      if (!r.ok) {
-        const t = await r.text().catch(()=> '');
-        throw new Error(`REST indexer ${r.status}: ${t || r.statusText}`);
-      }
-      const j = await r.json();
-      const txs = j?.transactions || [];
-      if (txs.length > 0) {
-        txs.sort((a, b) => (b['confirmed-round'] || 0) - (a['confirmed-round'] || 0));
-        const tx = txs[0];
-
-        const noteB64 = tx.note || null;
-        const noteUtf8 = noteB64 ? Buffer.from(noteB64, 'base64').toString('utf8') : null;
-
-        let parsed = null;
-        if (noteUtf8 && noteUtf8.startsWith('ALGOCERT|v1|')) {
-          const parts = noteUtf8.split('|');
-          parsed = {
-            hash: (parts[2] || '').toLowerCase(),
-            cid: parts[3] || null,
-            wallet: parts[4] || tx.sender || null,
-            ts: parts[5] ? Number(parts[5]) : null,
-          };
+      // 2) REST
+      try {
+        const url = new URL(`${INDEXER_URL.replace(/\/+$/,'')}/v2/transactions`);
+        url.searchParams.set('note-prefix', prefixB64);
+        url.searchParams.set('tx-type', 'pay');
+        url.searchParams.set('after-time', afterIso);
+        url.searchParams.set('before-time', beforeIso);
+        url.searchParams.set('limit', '10');
+        if (algosdk.isValidAddress(wallet)) {
+          url.searchParams.set('address', wallet);
+          if (role === 'receiver' || role === 'sender') url.searchParams.set('address-role', role);
         }
 
-        return res.json({
-          found: true,
-          txId: tx.id,
-          round: tx['confirmed-round'] || null,
-          from: tx.sender,
-          to: tx['payment-transaction']?.receiver || null,
-          noteUtf8,
-          parsed,
-          provider: 'rest',
-          afterIso,
-          beforeIso,
-          hours: { afterHours, aheadHours }
-        });
+        const r = await fetch(url.toString());
+        if (!r.ok) {
+          const t = await r.text().catch(()=> '');
+          throw new Error(`REST indexer ${r.status}: ${t || r.statusText}`);
+        }
+        const j = await r.json();
+        const txs = j?.transactions || [];
+        if (txs.length > 0) {
+          txs.sort((a, b) => (b['confirmed-round'] || 0) - (a['confirmed-round'] || 0));
+          const tx = txs[0];
+
+          const noteB64 = tx.note || null;
+          const noteUtf8 = noteB64 ? Buffer.from(noteB64, 'base64').toString('utf8') : null;
+          const parsed = parseAlgocertNote(noteUtf8, tx.sender || null);
+
+          if (parsed) {
+            return {
+              found: true,
+              txId: tx.id,
+              round: tx['confirmed-round'] || null,
+              from: tx.sender,
+              to: tx['payment-transaction']?.receiver || null,
+              noteUtf8,
+              parsed,
+              provider: 'rest',
+              afterIso,
+              beforeIso,
+              hours: { afterHours, aheadHours }
+            };
+          }
+        }
+      } catch (restErr) {
+        console.warn('[Indexer REST] fallo/timeout…', restErr?.message || restErr);
       }
-    } catch (restErr) {
-      console.warn('[Indexer REST] fallo/timeout…', restErr?.message || restErr);
+
+      return null;
+    };
+
+    // Prueba v2 luego v1 (o al revés si prefieres)
+    const versions = ['v2', 'v1'];
+    for (const ver of versions) {
+      const r = await tryVersion(ver);
+      if (r) return res.json(r);
     }
 
-    // ---------- 3) Nada encontrado ----------
     return res.json({
       found: false,
       afterIso,
@@ -849,64 +1063,64 @@ app.get('/api/indexer/lookup-by-hash', async (req, res) => {
   }
 });
 
+// ---------- Lookup por NOTE B64 (v1 o v2) ----------
 app.get('/api/indexer/lookup-by-b64', async (req, res) => {
   try {
     const b64 = String(req.query.b64 || '').trim().replace(/\s+/g, '');
-    const spanDays = Number(req.query.spanDays || 3); // ventana +-3 días (ajustable)
+    const spanDays = Number(req.query.spanDays || 3);
     if (!b64) return res.status(400).json({ error: 'Parámetro b64 requerido' });
 
-    // 1) Decodificar NOTE
+    // 1) Decodificar NOTE y parse genérico
     let noteUtf8;
     try {
       noteUtf8 = Buffer.from(b64, 'base64').toString('utf8');
     } catch {
       return res.status(400).json({ error: 'b64 inválido' });
     }
-    if (!noteUtf8.startsWith('ALGOCERT|v1|')) {
-      return res.status(400).json({ error: 'El note decodificado no tiene el formato ALGOCERT|v1|...' });
+    const parsed0 = parseAlgocertNote(noteUtf8);
+    if (!parsed0) {
+      return res.status(400).json({ error: 'El note no tiene formato ALGOCERT|v1|... o ALGOCERT|v2|...' });
     }
-    const parts = noteUtf8.split('|'); // ALGOCERT|v1|<hash>|<cid>|<wallet>|<tsMs>
-    const hashHex = (parts[2] || '').toLowerCase();
-    const cid = parts[3] || null;
-    const wallet = parts[4] || '';
-    const tsMs = Number(parts[5]) || null;
+
+    const { version, hash: hashHex, wallet: walletFromNote, ts } = parsed0;
 
     if (!/^[0-9a-f]{64}$/.test(hashHex)) {
       return res.status(400).json({ error: 'hash en note inválido (se esperaban 64 hex chars)' });
     }
 
-    // 2) Construye prefix y ventana temporal
-    const prefixUtf8 = `ALGOCERT|v1|${hashHex}`;
+    // 2) Prefijo y ventana temporal en función de la versión
+    const prefixUtf8 = `ALGOCERT|${version}|${hashHex}|`; // pipe final para selectividad
     const prefixB64 = Buffer.from(prefixUtf8, 'utf8').toString('base64');
 
     let afterIso, beforeIso;
-    if (tsMs && Number.isFinite(tsMs)) {
-      const base = new Date(tsMs);
-      afterIso = new Date(base.getTime() - spanDays * 864e5).toISOString();
+    if (ts && Number.isFinite(ts)) {
+      const base = new Date(ts);
+      afterIso  = new Date(base.getTime() - spanDays * 864e5).toISOString();
       beforeIso = new Date(base.getTime() + spanDays * 864e5).toISOString();
     } else {
-      // fallback: 1 año atrás hasta mañana
-      afterIso = new Date(Date.now() - 365 * 864e5).toISOString();
-      beforeIso = new Date(Date.now() + 1 * 864e5).toISOString();
+      afterIso  = new Date(Date.now() - 365 * 864e5).toISOString();
+      beforeIso = new Date(Date.now() + 1  * 864e5).toISOString();
     }
+
+    const wallet = String(req.query.wallet || walletFromNote || '').trim();
 
     // 3) Fallback REST por proveedores
     let lastErr = null;
     for (const base of IDX_CHAIN) {
       try {
-        // Primero como receiver (el alumno/beneficiario)
+        // receiver
         const url1 = buildIdxUrl(base, { b64prefix: prefixB64, wallet, role: 'receiver', limit: 1, afterIso, beforeIso });
         const j1 = await fetchIdx(base, url1);
         let norm = normalizeTxResp(j1);
 
-        // Si no hay, intentamos como sender (por si el anclado fue self o desde la cuenta del server)
+        // sender
         if (!norm && algosdk.isValidAddress(wallet)) {
           const url2 = buildIdxUrl(base, { b64prefix: prefixB64, wallet, role: 'sender', limit: 1, afterIso, beforeIso });
           const j2 = await fetchIdx(base, url2);
           norm = normalizeTxResp(j2);
         }
 
-        // Último intento: sin wallet
+        // sin wallet
         if (!norm) {
           const url3 = buildIdxUrl(base, { b64prefix: prefixB64, wallet: '', role: '', limit: 1, afterIso, beforeIso });
           const j3 = await fetchIdx(base, url3);
@@ -914,17 +1128,7 @@ app.get('/api/indexer/lookup-by-b64', async (req, res) => {
         }
 
         if (norm) {
-          // Parse del note para respuesta bonita
-          let parsed = null;
-          if (norm.noteUtf8 && norm.noteUtf8.startsWith('ALGOCERT|v1|')) {
-            const p = norm.noteUtf8.split('|');
-            parsed = {
-              hash: p[2] || null,
-              cid: p[3] || null,
-              wallet: p[4] || norm.from || null,
-              ts: p[5] ? Number(p[5]) : null,
-            };
-          }
+          const p = parseAlgocertNote(norm.noteUtf8 || '', norm.from || null);
           return res.json({
             found: true,
             txId: norm.txId,
@@ -932,14 +1136,14 @@ app.get('/api/indexer/lookup-by-b64', async (req, res) => {
             from: norm.from,
             to: norm.to,
             noteUtf8: norm.noteUtf8,
-            parsed,
+            parsed: p,
             provider: base,
             method: 'rest-by-b64',
           });
         }
       } catch (e) {
         lastErr = e;
-        continue; // prueba siguiente proveedor
+        continue;
       }
     }
 
@@ -955,12 +1159,9 @@ app.get('/api/indexer/lookup-by-b64', async (req, res) => {
   }
 });
 
-
-
-// ---------- start server (ÚNICO listen) ----------
+// ---------- start server ----------
 app.listen(PORT, () => {
   console.log(`[ALGOD_URL] ${ALGOD_URL}`);
   console.log(`[ALGOD_TOKEN length] ${ALGOD_TOKEN?.length || 0}`);
   console.log(`✅ Backend corriendo en http://localhost:${PORT}`);
 });
-
