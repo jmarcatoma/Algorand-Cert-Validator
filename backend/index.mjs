@@ -11,23 +11,6 @@ import algosdk from 'algosdk';
 
 dotenv.config();
 
-// --- Helpers tiempo (Ecuador UTC-5) ---
-function toEcuadorLocal(ms) {
-  if (ms == null) return null;
-  try {
-    return new Intl.DateTimeFormat('es-EC', {
-      timeZone: 'America/Guayaquil',
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit',
-      hour12: false
-    }).format(new Date(ms));
-  } catch {
-    return new Date(ms).toISOString();
-  }
-}
-
-
-
 // -------------------- NOTE parser (v1 y v2) --------------------
 function parseAlgocertNote(noteUtf8, fallbackWallet = null) {
   if (!noteUtf8 || !noteUtf8.startsWith('ALGOCERT|')) return null;
@@ -43,8 +26,10 @@ function parseAlgocertNote(noteUtf8, fallbackWallet = null) {
     nombre: null,
     // comunes
     wallet: fallbackWallet || null,
+    // única fecha de proceso (ms)
     ts: null,
   };
+
   if (version === 'v1') { // ALGOCERT|v1|hash|cid|wallet|ts
     out.cid    = p[3] || null;
     out.wallet = p[4] || fallbackWallet || null;
@@ -57,6 +42,24 @@ function parseAlgocertNote(noteUtf8, fallbackWallet = null) {
   }
   return out;
 }
+
+// --- Formateo Ecuador (seguro) ---
+function toEcuadorLocal(ms) {
+  if (ms == null || !Number.isFinite(ms)) return null;
+  try {
+    return new Intl.DateTimeFormat('es-EC', {
+      timeZone: 'America/Guayaquil',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hour12: false
+    }).format(new Date(ms));
+  } catch {
+    return new Date(ms).toISOString();
+  }
+}
+const toEcStrOrNull = (ms) => (Number.isFinite(ms) ? toEcuadorLocal(ms) : null);
+
+
 
 // ------------------ Address helper (intacto) -------------------
 const toAddrString = (addrLike) => {
@@ -506,11 +509,10 @@ app.get('/api/tx/:txId/status', async (req, res) => {
 });
 
 // ---------- Anclar usando note v1 ----------
+// NOTE: ALGOCERT|v1|<hash>|<cid>|<wallet>|<ts>
 app.post('/api/algod/anchorNote', express.json(), async (req, res) => {
   try {
-    if (!serverAcct) {
-      return res.status(501).json({ error: 'Server signer no configurado' });
-    }
+    if (!serverAcct) return res.status(501).json({ error: 'Server signer no configurado' });
 
     let { to, hashHex, cid, filename } = req.body || {};
     to = String(to || '').trim();
@@ -518,32 +520,22 @@ app.post('/api/algod/anchorNote', express.json(), async (req, res) => {
     cid = String(cid || '').trim();
     filename = (String(filename || '').trim()).slice(0, 128);
 
-    if (!algosdk.isValidAddress(to)) {
-      return res.status(400).json({ error: `to inválido: ${to}` });
-    }
-    if (!/^[0-9a-f]{64}$/.test(hashHex)) {
-      return res.status(400).json({ error: 'hashHex inválido (64 hex chars)' });
-    }
-    if (!cid) {
-      return res.status(400).json({ error: 'cid requerido' });
-    }
+    if (!algosdk.isValidAddress(to)) return res.status(400).json({ error: `to inválido: ${to}` });
+    if (!/^[0-9a-f]{64}$/.test(hashHex)) return res.status(400).json({ error: 'hashHex inválido (64 hex chars)' });
+    if (!cid) return res.status(400).json({ error: 'cid requerido' });
 
-    const noteStr = `ALGOCERT|v1|${hashHex}|${cid}|${to}|${Date.now()}`;
+    // ✅ fecha 100% backend
+    const ts = Date.now();
+
+    // ⚠️ Usa ts, NO processTs
+    const noteStr = `ALGOCERT|v1|${hashHex}|${cid}|${to}|${ts}`;
     const note = new Uint8Array(Buffer.from(noteStr, 'utf8'));
 
     const raw = await algodClient.getTransactionParams().do();
-    const sp = {
-      ...raw,
-      flatFee: true,
-      fee: Number(raw.minFee || raw.fee || 1000),
-    };
+    const sp = { ...raw, flatFee: true, fee: Number(raw.minFee || raw.fee || 1000) };
 
     const txn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({
-      from: serverAcct.addr,
-      to,
-      amount: 0,
-      note,
-      suggestedParams: sp,
+      from: serverAcct.addr, to, amount: 0, note, suggestedParams: sp,
     });
 
     const signed = txn.signTxn(serverAcct.sk);
@@ -551,26 +543,13 @@ app.post('/api/algod/anchorNote', express.json(), async (req, res) => {
     const confirmed = await waitForConfirmation(algodClient, txId, 12).catch(() => null);
     const round = confirmed ? confirmed['confirmed-round'] : null;
 
-    // ✅ intento de adjuntar a BD automáticamente (no falla el endpoint si no existe el hash aún)
-    let dbAttached = false;
-    try {
-      const q = `
-        UPDATE certificados
-           SET txid = $1, round = COALESCE($2, round)
-         WHERE hash = $3
-      `;
-      const r = await pool.query(q, [txId, round ?? null, hashHex]);
-      dbAttached = r.rowCount > 0;
-    } catch (e) {
-      console.warn('[anchorNote] attach DB opcional falló:', e?.message || e);
-    }
-
     return res.json({
       ok: true,
       txId,
       round,
-      dbAttached,
-      notePreview: noteStr.slice(0, 120),
+      notePreview: noteStr.slice(0, 200),
+      processTs: ts,                        // <- clave del JSON, valor ts
+      processAtLocal: toEcuadorLocal(ts),   // <- formateado Ecuador
     });
   } catch (e) {
     console.error('anchorNote error:', e);
@@ -579,13 +558,11 @@ app.post('/api/algod/anchorNote', express.json(), async (req, res) => {
 });
 
 
-
-// ---------- Anclar usando note v2: ALGOCERT|v2|<hash>|<tipo>|<nombre>|<wallet>|<ts> ----------
+// ---------- Anclar usando note v2 ----------
+// NOTE: ALGOCERT|v2|<hash>|<tipo>|<nombre>|<wallet>|<ts>
 app.post('/api/algod/anchorNoteUpload', express.json(), async (req, res) => {
   try {
-    if (!serverAcct) {
-      return res.status(501).json({ error: 'Server signer no configurado' });
-    }
+    if (!serverAcct) return res.status(501).json({ error: 'Server signer no configurado' });
 
     let { to, hashHex, tipo, nombreCert, filename } = req.body || {};
     to         = String(to || '').trim();
@@ -594,40 +571,25 @@ app.post('/api/algod/anchorNoteUpload', express.json(), async (req, res) => {
     nombreCert = String(nombreCert || '').trim();
     filename   = (String(filename || '').trim()).slice(0, 128);
 
-    if (!algosdk.isValidAddress(to)) {
-      return res.status(400).json({ error: `to inválido: ${to}` });
-    }
-    if (!/^[0-9a-f]{64}$/.test(hashHex)) {
-      return res.status(400).json({ error: 'hashHex inválido (64 hex chars)' });
-    }
-    if (!tipo) {
-      return res.status(400).json({ error: 'tipo requerido' });
-    }
-    if (!nombreCert) {
-      return res.status(400).json({ error: 'nombreCert requerido' });
-    }
+    if (!algosdk.isValidAddress(to)) return res.status(400).json({ error: `to inválido: ${to}` });
+    if (!/^[0-9a-f]{64}$/.test(hashHex)) return res.status(400).json({ error: 'hashHex inválido (64 hex chars)' });
+    if (!tipo) return res.status(400).json({ error: 'tipo requerido' });
+    if (!nombreCert) return res.status(400).json({ error: 'nombreCert requerido' });
 
-    // Saneo básico para evitar pipes y limitar tamaño de campos
     const clean = (s, max = 160) => s.replace(/\|/g, ' ').slice(0, max);
 
-    // Nota v2 (sin CID): tipo + nombre en texto
-    const noteStr = `ALGOCERT|v2|${hashHex}|${clean(tipo, 64)}|${clean(nombreCert, 160)}|${to}|${Date.now()}`;
+    // ✅ fecha 100% backend
+    const ts = Date.now();
+
+    // ⚠️ Usa ts, NO processTs
+    const noteStr = `ALGOCERT|v2|${hashHex}|${clean(tipo,64)}|${clean(nombreCert,160)}|${to}|${ts}`;
     const note = new Uint8Array(Buffer.from(noteStr, 'utf8'));
 
-    // Params y TX 0 ALGO
     const raw = await algodClient.getTransactionParams().do();
-    const sp = {
-      ...raw,
-      flatFee: true,
-      fee: Number(raw.minFee || raw.fee || 1000),
-    };
+    const sp = { ...raw, flatFee: true, fee: Number(raw.minFee || raw.fee || 1000) };
 
     const txn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({
-      from: serverAcct.addr,
-      to,
-      amount: 0,
-      note,
-      suggestedParams: sp,
+      from: serverAcct.addr, to, amount: 0, note, suggestedParams: sp,
     });
 
     const signed = txn.signTxn(serverAcct.sk);
@@ -635,26 +597,13 @@ app.post('/api/algod/anchorNoteUpload', express.json(), async (req, res) => {
     const confirmed = await waitForConfirmation(algodClient, txId, 12).catch(() => null);
     const round = confirmed ? confirmed['confirmed-round'] : null;
 
-    // ✅ Intenta adjuntar en BD por hash (opcional, no rompe si no existe)
-    let dbAttached = false;
-    try {
-      const q = `
-        UPDATE certificados
-           SET txid = $1, round = COALESCE($2, round)
-         WHERE hash = $3
-      `;
-      const r = await pool.query(q, [txId, round ?? null, hashHex]);
-      dbAttached = r.rowCount > 0;
-    } catch (e) {
-      console.warn('[anchorNoteUpload] attach DB opcional falló:', e?.message || e);
-    }
-
     return res.json({
       ok: true,
       txId,
       round,
-      dbAttached,
       notePreview: noteStr.slice(0, 200),
+      processTs: ts,
+      processAtLocal: toEcuadorLocal(ts),
     });
   } catch (e) {
     console.error('anchorNoteUpload error:', e);
@@ -798,6 +747,7 @@ app.get('/api/algod/tx/:txId', async (req, res) => {
 });
 
 // ---------- Lookup transacción por txId (Indexer + parse NOTE) ----------
+// ---------- Lookup transacción por txId (Indexer + parse NOTE) ----------
 app.get('/api/indexer/tx/:txId', async (req, res) => {
   const { txId } = req.params;
   try {
@@ -808,6 +758,9 @@ app.get('/api/indexer/tx/:txId', async (req, res) => {
       if (tx) {
         const noteB64 = tx.note || null;
         const noteUtf8 = noteB64 ? Buffer.from(noteB64, 'base64').toString('utf8') : null;
+        const parsed = parseAlgocertNote(noteUtf8, tx.sender ?? null);
+        const processTs = parsed?.ts ?? null;
+
         return res.json({
           ok: true,
           txId,
@@ -816,7 +769,11 @@ app.get('/api/indexer/tx/:txId', async (req, res) => {
           to: tx['payment-transaction']?.receiver ?? null,
           noteB64,
           noteUtf8,
-          parsed: parseAlgocertNote(noteUtf8, tx.sender ?? null),
+          parsed,
+          dates: {
+            processTs,
+            processAtLocal: processTs ? toEcuadorLocal(processTs) : null,
+          },
           provider: 'indexer',
         });
       }
@@ -831,6 +788,9 @@ app.get('/api/indexer/tx/:txId', async (req, res) => {
         if (tx) {
           const noteB64 = tx.note || null;
           const noteUtf8 = noteB64 ? Buffer.from(noteB64, 'base64').toString('utf8') : null;
+          const parsed = parseAlgocertNote(noteUtf8, tx.sender ?? null);
+          const processTs = parsed?.ts ?? null;
+
           return res.json({
             ok: true,
             txId,
@@ -839,7 +799,11 @@ app.get('/api/indexer/tx/:txId', async (req, res) => {
             to: tx['payment-transaction']?.receiver ?? null,
             noteB64,
             noteUtf8,
-            parsed: parseAlgocertNote(noteUtf8, tx.sender ?? null),
+            parsed,
+            dates: {
+              processTs,
+              processAtLocal: processTs ? toEcuadorLocal(processTs) : null,
+            },
             provider: 'indexer-rest',
           });
         }
@@ -849,6 +813,9 @@ app.get('/api/indexer/tx/:txId', async (req, res) => {
           const info = await algodClient.pendingTransactionInformation(txId).do();
           const noteB64 = info?.txn?.txn?.note || null;
           const noteUtf8 = noteB64 ? Buffer.from(noteB64, 'base64').toString('utf8') : null;
+          const parsed = parseAlgocertNote(noteUtf8, info?.sender ?? null);
+          const processTs = parsed?.ts ?? null;
+
           return res.json({
             ok: true,
             txId,
@@ -857,7 +824,11 @@ app.get('/api/indexer/tx/:txId', async (req, res) => {
             to: info?.['payment-transaction']?.receiver ?? null,
             noteB64,
             noteUtf8,
-            parsed: parseAlgocertNote(noteUtf8, info?.sender ?? null),
+            parsed,
+            dates: {
+              processTs,
+              processAtLocal: processTs ? toEcuadorLocal(processTs) : null,
+            },
             provider: 'algod-pending',
           });
         } catch (e3) {
@@ -981,6 +952,10 @@ app.get('/api/indexer/lookup-by-hash', async (req, res) => {
               to: tx['payment-transaction']?.receiver || null,
               noteUtf8,
               parsed,
+              dates: {
+                processTs,
+                processAtLocal: processTs ? toEcuadorLocal(processTs) : null,
+              },
               provider: 'sdk',
               afterIso,
               beforeIso,
@@ -1029,6 +1004,10 @@ app.get('/api/indexer/lookup-by-hash', async (req, res) => {
               to: tx['payment-transaction']?.receiver || null,
               noteUtf8,
               parsed,
+              dates: {
+                processTs,
+                processAtLocal: processTs ? toEcuadorLocal(processTs) : null,
+              },
               provider: 'rest',
               afterIso,
               beforeIso,

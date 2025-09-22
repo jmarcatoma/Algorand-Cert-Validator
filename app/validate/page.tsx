@@ -16,6 +16,29 @@ async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
   return arr.map(b => b.toString(16).padStart(2, "0")).join("")
 }
 
+export const IPFS_GATEWAY_BASE =
+  (process.env.NEXT_PUBLIC_IPFS_GATEWAY || 'https://ipfs.io').replace(/\/+$/, '');
+
+export const ALGO_EXPLORER_BASE =
+  (process.env.NEXT_PUBLIC_ALGO_EXPLORER_BASE || 'https://algoexplorer.io').replace(/\/+$/, '');
+
+
+type ValidateDetails = {
+  filename?: string
+  hashHex: string
+  wallet?: string | null
+  cid?: string | null
+  tipo?: string | null
+  nombre?: string | null
+  txId?: string | null
+  round?: number | null
+  onchainNoteMatches?: boolean
+  ipfsAvailable?: boolean
+  version?: "v1" | "v2" | string | null
+  // NUEVO:
+  processAtLocal?: string | null
+}
+
 export default function ValidatePage() {
   const [file, setFile] = useState<File | null>(null)
   const [busy, setBusy] = useState(false)
@@ -23,19 +46,7 @@ export default function ValidatePage() {
   const [result, setResult] = useState<{
     valid: boolean
     message: string
-    details?: {
-      filename?: string
-      hashHex: string
-      wallet?: string | null
-      cid?: string | null
-      tipo?: string | null
-      nombre?: string | null
-      txId?: string | null
-      round?: number | null
-      onchainNoteMatches?: boolean
-      ipfsAvailable?: boolean
-      version?: "v1" | "v2" | string | null
-    }
+    details?: ValidateDetails
   } | null>(null)
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -53,7 +64,7 @@ export default function ValidatePage() {
       const bytes = await file.arrayBuffer()
       const hashHex = await sha256Hex(bytes)
 
-      // 2) Backend: DB -> txId -> Indexer
+      // 2) Backend: DB -> txId -> Indexer (la fecha viene del NOTE via Indexer)
       const resp = await fetch(`http://localhost:4000/api/validate/hash/${hashHex}`)
       const data = await resp.json()
 
@@ -88,6 +99,7 @@ export default function ValidatePage() {
             onchainNoteMatches: false,
             ipfsAvailable: !!data?.db?.cid,
             version: null,
+            processAtLocal: data?.indexer?.dates?.processAtLocal || null, // si llegó igual lo mostramos
           },
         })
         return
@@ -102,6 +114,7 @@ export default function ValidatePage() {
       const cid = parsed.cid || data?.db?.cid || null
       const txId = idx.txId || data?.db?.txid || null
       const round = idx.round ?? data?.db?.round ?? null
+      const processAtLocal = idx?.dates?.processAtLocal || null
 
       setResult({
         valid: matches,
@@ -118,6 +131,7 @@ export default function ValidatePage() {
           onchainNoteMatches: matches,
           ipfsAvailable: !!cid,
           version: parsed.version || null,
+          processAtLocal,
         },
       })
     } catch (e) {
@@ -132,13 +146,15 @@ export default function ValidatePage() {
   }
 
   const abrirTxEnExplorer = () => {
-    const txId = result?.details?.txId
-    if (txId) window.open(`https://algoexplorer.io/tx/${txId}`, "_blank")
-  }
+    const txId = result?.details?.txId;
+    if (txId) 
+      window.open(`${ALGO_EXPLORER_BASE}/tx/${txId}`, "_blank");
+    }
 
   const abrirEnIPFS = () => {
-    const cid = result?.details?.cid
-    if (cid) window.open(`https://ipfs.io/ipfs/${cid}`, "_blank")
+    const cid = result?.details?.cid;
+    if (cid) 
+      window.open(`${IPFS_GATEWAY_BASE}/ipfs/${cid}`, "_blank");
   }
 
   return (
@@ -238,6 +254,15 @@ export default function ValidatePage() {
                       {typeof result.details.round === "number" ? result.details.round : "(n/d)"}
                     </p>
                   </div>
+
+                  {/* NUEVO: Fecha de proceso (Ecuador) */}
+                  {result.details.processAtLocal && (
+                    <div className="sm:col-span-2">
+                      <p className="font-medium">Fecha de proceso (EC)</p>
+                      <p className="text-muted-foreground">{result.details.processAtLocal}</p>
+                    </div>
+                  )}
+
                   <div>
                     <p className="font-medium">Note on-chain coincide</p>
                     <p className="text-muted-foreground">{result.details.onchainNoteMatches ? "Sí" : "No"}</p>
