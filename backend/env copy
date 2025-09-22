@@ -1,0 +1,48 @@
+
+# Datos de conexión a PostgreSQL
+PGHOST=localhost
+PGUSER=postgres
+PGPASSWORD=admin
+PGDATABASE=certificados_db
+PGPORT=5432
+
+#Backend
+# Puerto donde correrá el backend
+PORT=4000
+# Clave de API para proteger rutas (puedes cambiarla)
+ADMIN_KEY=1234567
+
+const ADMIN_WALLET = "WF7545X4CNPWV2XUIJ6VSA47Q37WEYVLZCZCEGO72DDNK2RZEVMNBXV2IE";
+
+#DATABASE_URL=postgresql://postgres:1234567@localhost:5433/certificados_db
+
+# Algorand node (NodeKit en tu VM)
+ALGOD_URL=http://192.168.101.190:4001
+ALGOD_TOKEN=77eeca1064bb201a8646ccc2a49d548a1d8c3d8c2bc912c9bb950a64743c6272
+
+# principal
+INDEXER_URL=https://mainnet-idx.algonode.cloud
+# fallback en cadena (coma-separados)
+INDEXER_URLS=https://mainnet-idx.algonode.cloud,https://mainnet-idx.4160.nodely.dev,https://algoexplorerapi.io/idx2
+
+# IPFS (sin slash al final es opcional; lo normalizamos igual)
+NEXT_PUBLIC_IPFS_GATEWAY=http://192.168.101.194:8080
+
+# (Opcional) Explorador de transacciones
+# Ejemplos:
+# NEXT_PUBLIC_ALGO_EXPLORER_BASE=https://algoexplorer.io
+NEXT_PUBLIC_ALGO_EXPLORER_BASE=https://explorer.perawallet.app
+
+NOTE_PREFIX=ALGOCERT1
+
+# Solo para pruebas (firma en backend). En prod: firma la wallet del cliente.
+SENDER_MNEMONIC=""
+SENDER_ADDRESS=""
+ALGOD_MNEMONIC=lawn pill wage situate camera buddy off hero attack print cherry protect again salad oxygen erase multiply response say rare seed enroll whip absorb payment
+# Indexer (en tu VM; ajusta puerto si usaste otro)
+#INDEXER_URL=http://192.168.101.190:8980
+#INDEXER_TOKEN=   # en blanco si no configuraste token
+
+# ventana por defecto (en HORAS)
+IDX_LOOKBACK_HOURS=2     # cuánto mirar hacia atrás (default 1h)
+IDX_AHEAD_HOURS=2        # margen hacia adelante (default 1h)
