@@ -88,6 +88,7 @@ export default function CertificadoUpload({ wallet }: { wallet: string }) {
         const body = {
           to: wallet,
           hashHex: hash,
+          cid: data.cid,
           filename: file.name,
           tipo: tipo.trim(),
           nombreCert: nombreCert.trim(),

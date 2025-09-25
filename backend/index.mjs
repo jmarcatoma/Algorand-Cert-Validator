@@ -34,11 +34,12 @@ function parseAlgocertNote(noteUtf8, fallbackWallet = null) {
     out.cid    = p[3] || null;
     out.wallet = p[4] || fallbackWallet || null;
     out.ts     = p[5] ? Number(p[5]) : null;
-  } else if (version === 'v2') { // ALGOCERT|v2|hash|tipo|nombre|wallet|ts
-    out.tipo   = p[3] || null;
-    out.nombre = p[4] || null;
-    out.wallet = p[5] || fallbackWallet || null;
-    out.ts     = p[6] ? Number(p[6]) : null;
+  } else if (version === 'v2') { // ALGOCERT|v2|hash|cid|tipo|nombre|wallet|ts
+    out.cid    = p[3] || null;
+    out.tipo   = p[4] || null;
+    out.nombre = p[5] || null;
+    out.wallet = p[6] || fallbackWallet || null;
+    out.ts     = p[7] ? Number(p[6]) : null;
   }
   return out;
 }
@@ -564,9 +565,11 @@ app.post('/api/algod/anchorNoteUpload', express.json(), async (req, res) => {
   try {
     if (!serverAcct) return res.status(501).json({ error: 'Server signer no configurado' });
 
-    let { to, hashHex, tipo, nombreCert, filename } = req.body || {};
+    let { to, hashHex, cid, tipo, nombreCert, filename } = req.body || {};
+    
     to         = String(to || '').trim();
     hashHex    = String(hashHex || '').trim().toLowerCase();
+    cid        = String(cid || '').trim();
     tipo       = String(tipo || '').trim();
     nombreCert = String(nombreCert || '').trim();
     filename   = (String(filename || '').trim()).slice(0, 128);
@@ -575,6 +578,7 @@ app.post('/api/algod/anchorNoteUpload', express.json(), async (req, res) => {
     if (!/^[0-9a-f]{64}$/.test(hashHex)) return res.status(400).json({ error: 'hashHex inválido (64 hex chars)' });
     if (!tipo) return res.status(400).json({ error: 'tipo requerido' });
     if (!nombreCert) return res.status(400).json({ error: 'nombreCert requerido' });
+    if (!cid) return res.status(400).json({ error: 'cid requerido' });
 
     const clean = (s, max = 160) => s.replace(/\|/g, ' ').slice(0, max);
 
@@ -582,7 +586,7 @@ app.post('/api/algod/anchorNoteUpload', express.json(), async (req, res) => {
     const ts = Date.now();
 
     // ⚠️ Usa ts, NO processTs
-    const noteStr = `ALGOCERT|v2|${hashHex}|${clean(tipo,64)}|${clean(nombreCert,160)}|${to}|${ts}`;
+    const noteStr = `ALGOCERT|v2|${hashHex}|${cid}|${clean(tipo,64)}|${clean(nombreCert,160)}|${to}|${ts}`;
     const note = new Uint8Array(Buffer.from(noteStr, 'utf8'));
 
     const raw = await algodClient.getTransactionParams().do();
@@ -747,7 +751,6 @@ app.get('/api/algod/tx/:txId', async (req, res) => {
 });
 
 // ---------- Lookup transacción por txId (Indexer + parse NOTE) ----------
-// ---------- Lookup transacción por txId (Indexer + parse NOTE) ----------
 app.get('/api/indexer/tx/:txId', async (req, res) => {
   const { txId } = req.params;
   try {
@@ -850,7 +853,7 @@ app.get('/api/validate/hash/:hash', async (req, res) => {
     if (!/^[0-9a-f]{64}$/.test(hash)) return res.status(400).json({ error: 'hash inválido (64 hex chars)' });
 
     const r = await pool.query(
-      `SELECT id, wallet, nombre_archivo, hash, cid, txid, round, fecha
+      `SELECT id, hash, txid
          FROM certificados
         WHERE hash = $1
         LIMIT 1`,
@@ -866,7 +869,6 @@ app.get('/api/validate/hash/:hash', async (req, res) => {
         ok: false,
         pending: true,
         message: 'El hash existe en BD pero aún no tiene txId asociado.',
-        db: row,
       });
     }
 
@@ -883,7 +885,6 @@ app.get('/api/validate/hash/:hash', async (req, res) => {
       message: matches
         ? 'El hash coincide con la nota on-chain.'
         : 'La nota on-chain no coincide con el hash.',
-      db: row,
       indexer: data,
     });
   } catch (e) {

@@ -80,40 +80,15 @@ export default function ValidatePage() {
         return
       }
 
-      if (!data?.ok) {
-        // Casos: no está en BD / pendiente sin txId
-        const msg =
-          data?.pending
-            ? "El hash existe en BD pero aún no tiene txId asociado."
-            : (data?.error || "No se encontró información para este hash.")
-        setResult({
-          valid: false,
-          message: msg,
-          details: {
-            filename: file.name,
-            hashHex,
-            wallet: data?.db?.wallet || null,
-            cid: data?.db?.cid || null,
-            txId: data?.db?.txid || null,
-            round: data?.db?.round ?? null,
-            onchainNoteMatches: false,
-            ipfsAvailable: !!data?.db?.cid,
-            version: null,
-            processAtLocal: data?.indexer?.dates?.processAtLocal || null, // si llegó igual lo mostramos
-          },
-        })
-        return
-      }
-
       // ok === true
       const idx = data.indexer || {}
       const parsed = idx.parsed || {}
       const matches = !!data.matches
 
-      const wallet = parsed.wallet || data?.db?.wallet || idx.from || null
-      const cid = parsed.cid || data?.db?.cid || null
-      const txId = idx.txId || data?.db?.txid || null
-      const round = idx.round ?? data?.db?.round ?? null
+      const wallet = parsed.wallet || idx.from || null
+      const cid = parsed.cid || null
+      const txId = idx.txId  || null
+      const round = idx.round  ?? null
       const processAtLocal = idx?.dates?.processAtLocal || null
 
       setResult({
