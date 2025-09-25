@@ -196,16 +196,16 @@ export default function ValidatePage() {
                   </div>
 
                   {/* v2 */}
+                  {result.details.nombre && (
+                    <div>
+                      <p className="font-medium">Nombre</p>
+                      <p className="text-muted-foreground break-words">{result.details.nombre}</p>
+                    </div>
+                  )}
                   {result.details.tipo && (
                     <div>
                       <p className="font-medium">Tipo de certificado</p>
                       <p className="text-muted-foreground break-words">{result.details.tipo}</p>
-                    </div>
-                  )}
-                  {result.details.nombre && (
-                    <div>
-                      <p className="font-medium">Nombre del certificado</p>
-                      <p className="text-muted-foreground break-words">{result.details.nombre}</p>
                     </div>
                   )}
 
