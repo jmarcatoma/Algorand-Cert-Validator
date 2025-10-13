@@ -84,6 +84,8 @@ export default function TitleForm({ wallet }: { wallet: string | null }) {
   const [anchoring, setAnchoring] = useState(false)
   const [txId, setTxId] = useState<string>('')
   const [round, setRound] = useState<number | null>(null)
+  const [confirmedBy, setConfirmedBy] = useState<'algod' | 'indexer-sdk' | 'indexer-rest' | 'unknown' | null>(null)
+  const [pending, setPending] = useState(false)
 
   const generarPDF = async () => {
     const existingPdfBytes = await fetch('/titulo_base_final.pdf').then(res => res.arrayBuffer())
@@ -104,8 +106,9 @@ export default function TitleForm({ wallet }: { wallet: string | null }) {
       })
     }
 
-    drawCentered(facultad.replace('Facultad de ', ''), 551, 30)
     const tituloFinal = (facultades as any)[facultad]?.find((c: any) => c.nombre === carrera)?.titulo || carrera
+
+    drawCentered(facultad.replace('Facultad de ', ''), 551, 30)
     drawCentered(tituloFinal, 470, 30)
     drawCentered(nombre, 395, 30)
 
@@ -117,13 +120,13 @@ export default function TitleForm({ wallet }: { wallet: string | null }) {
     page.drawText(` ${refrendado}`, { x: 125, y: 80, size: 11, font: fontBold, color: rgb(0, 0, 0) })
     page.drawText(` ${codigo}`, { x: width - 97, y: 80, size: 11, font: fontBold, color: rgb(0, 0, 0) })
 
-    return await pdfDoc.save()
+    return { bytes: await pdfDoc.save(), tituloFinal }
   }
 
   const vistaPrevia = async () => {
     try {
-      const pdfBytes = await generarPDF()
-      const blob = new Blob([pdfBytes], { type: 'application/pdf' })
+      const { bytes } = await generarPDF()
+      const blob = new Blob([bytes], { type: 'application/pdf' })
       const url = URL.createObjectURL(blob)
       window.open(url, '_blank')
     } catch {
@@ -135,8 +138,10 @@ export default function TitleForm({ wallet }: { wallet: string | null }) {
     try {
       const h = hashHexGenerado?.trim()
       if (!h) return toast.error('Aún no hay hash para descargar')
-      const url = `http://localhost:4000/api/certificados/${h}/download`
+      const url = `http://localhost:4000/api/download/by-hash/${h}`
       window.open(url, '_blank')
+
+
     } catch {
       toast.error('No se pudo iniciar la descarga')
     }
@@ -153,18 +158,18 @@ export default function TitleForm({ wallet }: { wallet: string | null }) {
     setHashHexGenerado('')
 
     try {
-      const pdfBytes = await generarPDF()
+      const { bytes, tituloFinal } = await generarPDF()
 
       // hash SHA-256 del PDF
-      const hashBuffer = await crypto.subtle.digest('SHA-256', pdfBytes)
+      const hashBuffer = await crypto.subtle.digest('SHA-256', bytes)
       const hashArray = Array.from(new Uint8Array(hashBuffer))
       const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
       const hashHexLower = hashHex.toLowerCase()
       setHashHexGenerado(hashHexLower)
 
-      // 1) Guardar en backend (IPFS + BD)
+      // 1) Guardar en backend (IPFS + BD opcional)
       const formData = new FormData()
-      formData.append('file', new Blob([pdfBytes], { type: 'application/pdf' }), `${nombre}_titulo.pdf`)
+      formData.append('file', new Blob([bytes], { type: 'application/pdf' }), `${nombre}_titulo.pdf`)
       formData.append('wallet', wallet)
       formData.append('hash', hashHexLower)
 
@@ -183,7 +188,7 @@ export default function TitleForm({ wallet }: { wallet: string | null }) {
       setShowSuccess(true)
       toast.success('Título guardado (IPFS + BD)')
 
-      // 2) Anclar en Algorand (v1: hash + cid + wallet + ts)
+      // 2) Anclar en Algorand (v1)
       try {
         setAnchoring(true)
         const anchorRes = await fetch('http://localhost:4000/api/algod/anchorNote', {
@@ -192,38 +197,53 @@ export default function TitleForm({ wallet }: { wallet: string | null }) {
           body: JSON.stringify({
             to: wallet,
             hashHex: hashHexLower,
-            cid: data.cid,                    // importante
-            filename: `${nombre}_titulo.pdf`, // opcional
+            cid: data.cid,
+            filename: `${nombre}_titulo.pdf`,
           }),
         })
         const ajson = await anchorRes.json().catch(() => ({} as any))
 
         if (anchorRes.ok && ajson.txId) {
           setTxId(ajson.txId)
+          setConfirmedBy(ajson.confirmedBy || null)
           setRound(ajson.round ?? null)
+          setPending(!ajson.round)
           toast.success('Transacción enviada a Algorand')
 
-          // 3) ✅ Adjuntar txId/round en la BD por hash
+          // 3) Adjuntar tx a BD (opcional)
           try {
-            const attachRes = await fetch(`http://localhost:4000/api/certificados/${hashHexLower}/attach-tx`, {
+            await fetch(`http://localhost:4000/api/certificados/${hashHexLower}/attach-tx`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ txId: ajson.txId, round: ajson.round ?? null }),
+            })
+          } catch {
+            // no crítico
+          }
+
+          // 4) ✅ Publicar en el índice IPFS (by-hash y by-owner)
+          try {
+            const pubRes = await fetch('http://localhost:4000/api/index/publish-hash', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
-                txId: ajson.txId,
-                round: ajson.round ?? null,
+                hash: hashHexLower,
+                pdf_cid: data.cid,
+                txid: ajson.txId,
+                wallet,
+                timestamp: new Date().toISOString(),
+                title: tituloFinal,
+                owner_name: nombre,
               }),
             })
-            if (attachRes.ok) {
-              const attachJson = await attachRes.json().catch(() => ({}))
-              console.log('[attach-tx] OK', attachJson)
+            if (pubRes.ok) {
+              const pubJ = await pubRes.json()
+              console.log('[publish-hash] OK', pubJ)
             } else {
-              const errTxt = await attachRes.text().catch(() => '')
-              console.warn('[attach-tx] NO OK', errTxt)
-              toast.warning('No se pudo adjuntar tx en la BD (revisar servidor)')
+              console.warn('[publish-hash] NO OK', await pubRes.text())
             }
           } catch (e) {
-            console.warn('[attach-tx] error de red', e)
-            toast.warning('No se pudo adjuntar tx en la BD (red)')
+            console.warn('[publish-hash] error', e)
           }
         } else {
           toast.error(ajson?.error || 'No se pudo anclar en Algorand')
@@ -291,9 +311,22 @@ export default function TitleForm({ wallet }: { wallet: string | null }) {
                   <div className="font-mono">{txId}</div>
                 </>
               )}
-              {typeof round === 'number' && (
-                <div>Round confirmado: <span className="font-mono">{round}</span></div>
+              {typeof round === "number" && (
+                <div className="text-sm">
+                  <b>Round:</b> {round}
+                  {confirmedBy && (
+                    <> <span className="mx-2">•</span>
+                      <span className="italic">
+                        confirmado por {confirmedBy === 'algod' ? 'Algod' :
+                                        confirmedBy === 'indexer-sdk' ? 'Indexer (SDK)' :
+                                        confirmedBy === 'indexer-rest' ? 'Indexer (REST)' : '—'}
+                      </span>
+                    </>
+                  )}
+                </div>
               )}
+              {pending && <div className="text-amber-600 text-sm">Aún pendiente de confirmación…</div>}
+
               <div className="flex flex-wrap items-center gap-2 mt-1">
                 <Button
                   type="button"

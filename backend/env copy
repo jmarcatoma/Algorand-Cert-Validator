@@ -46,3 +46,21 @@ ALGOD_MNEMONIC=lawn pill wage situate camera buddy off hero attack print cherry 
 # ventana por defecto (en HORAS)
 IDX_LOOKBACK_HOURS=2     # cuánto mirar hacia atrás (default 1h)
 IDX_AHEAD_HOURS=2        # margen hacia adelante (default 1h)
+
+
+# IPFS
+IPFS_API_URL=http://192.168.101.194:9095/api/v0
+IPFS_GATEWAY_URL=http://192.168.101.194:8080
+
+# Raíces de índice en MFS (no cambies las rutas salvo que lo decidas)
+CERT_INDEX_MFS_ROOT=/cert-index
+CERT_INDEX_SHARDS=2
+
+# Publicación por IPNS (opcional pero recomendado)
+# Si no tienes clave IPNS, deja vacío y trabajamos sólo con CID de root.
+CERT_INDEX_IPNS_KEY=algocert-index-key    # nombre de la key en 'ipfs key list' (opcional)
+# VALOR DE IPNS k51qzi5uqu5dhonp113olftb52kmnb3vo9nvyc20910k7nk1pgurprtwp3b0sb
+CERT_INDEX_CACHE_TTL_SEC=120              # cache en memoria del root CID
+
+# Si NO vas a usar IPNS todavía, puedes fijar el CID actual del índice:
+# CERT_INDEX_ROOT_CID=bafybeia...  # (opcional)

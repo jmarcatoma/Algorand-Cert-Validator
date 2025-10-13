@@ -68,6 +68,10 @@ export default function ValidatePage() {
       const resp = await fetch(`http://localhost:4000/api/validate/hash/${hashHex}`)
       const data = await resp.json()
 
+      const source = data?.source || (data?.meta ? 'ipfs-index' : 'indexer-lookup');
+      console.log('validate source:', source);
+
+
       if (!resp.ok) {
         setResult({
           valid: false,

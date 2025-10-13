@@ -1,6 +1,6 @@
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { ArrowRight, FileCheck, History, Shield, Users } from "lucide-react"
+import { ArrowRight, FileCheck, History, Users, Search } from "lucide-react"
 import Link from "next/link"
 
 export default function Home() {
@@ -15,8 +15,6 @@ export default function Home() {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-12">
-       
-
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-xl font-medium">Secretaría</CardTitle>
@@ -61,6 +59,24 @@ export default function Home() {
               Verifica la autenticidad de certificados y títulos mediante su hash en la blockchain.
             </CardDescription>
             <Link href="/validate">
+              <Button className="w-full mt-4">
+                Acceder <ArrowRight className="ml-2 h-4 w-4" />
+              </Button>
+            </Link>
+          </CardContent>
+        </Card>
+
+        {/* NUEVO: Búsqueda por Dueño */}
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-xl font-medium">Búsqueda por Nombre</CardTitle>
+            <Search className="h-5 w-5 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <CardDescription className="min-h-[80px]">
+              Encuentra todos los certificados de una persona por su nombre completo.
+            </CardDescription>
+            <Link href="/validate/owner">
               <Button className="w-full mt-4">
                 Acceder <ArrowRight className="ml-2 h-4 w-4" />
               </Button>
