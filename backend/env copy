@@ -17,7 +17,7 @@ const ADMIN_WALLET = "WF7545X4CNPWV2XUIJ6VSA47Q37WEYVLZCZCEGO72DDNK2RZEVMNBXV2IE
 #DATABASE_URL=postgresql://postgres:1234567@localhost:5433/certificados_db
 
 # Algorand node (NodeKit en tu VM)
-ALGOD_URL=http://192.168.101.190:4001
+ALGOD_URL=http://192.168.1.190:4001
 ALGOD_TOKEN=77eeca1064bb201a8646ccc2a49d548a1d8c3d8c2bc912c9bb950a64743c6272
 
 # principal
@@ -26,7 +26,7 @@ INDEXER_URL=https://mainnet-idx.algonode.cloud
 INDEXER_URLS=https://mainnet-idx.algonode.cloud,https://mainnet-idx.4160.nodely.dev,https://algoexplorerapi.io/idx2
 
 # IPFS (sin slash al final es opcional; lo normalizamos igual)
-NEXT_PUBLIC_IPFS_GATEWAY=http://192.168.101.194:8080
+NEXT_PUBLIC_IPFS_GATEWAY=http://192.168.1.194:8080
 
 # (Opcional) Explorador de transacciones
 # Ejemplos:
@@ -49,8 +49,8 @@ IDX_AHEAD_HOURS=2        # margen hacia adelante (default 1h)
 
 
 # IPFS
-IPFS_API_URL=http://192.168.101.194:9095/api/v0
-IPFS_GATEWAY_URL=http://192.168.101.194:8080
+IPFS_API_URL=http://192.168.1.194:9095/api/v0
+IPFS_GATEWAY_URL=http://192.168.1.194:8080
 
 # Raíces de índice en MFS (no cambies las rutas salvo que lo decidas)
 CERT_INDEX_MFS_ROOT=/cert-index

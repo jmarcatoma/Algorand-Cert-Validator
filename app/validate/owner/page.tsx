@@ -42,7 +42,7 @@ export default function OwnerSearchPage() {
   }
 
   const abrirIPFS = (cid:string) => {
-    window.open(`http://192.168.101.194:8080/ipfs/${cid}`, "_blank")
+    window.open(`http://192.168.1.194:8080/ipfs/${cid}`, "_blank")
   }
 
   return (

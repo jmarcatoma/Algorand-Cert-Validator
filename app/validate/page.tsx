@@ -17,7 +17,7 @@ async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
 }
 
 export const IPFS_GATEWAY_BASE =
-  (process.env.NEXT_PUBLIC_IPFS_GATEWAY || 'http://192.168.101.194:8080').replace(/\/+$/, '');
+  (process.env.NEXT_PUBLIC_IPFS_GATEWAY || 'http://192.168.1.194:8080').replace(/\/+$/, '');
 
 export const ALGO_EXPLORER_BASE =
   (process.env.NEXT_PUBLIC_ALGO_EXPLORER_BASE || 'https://explorer.perawallet.app').replace(/\/+$/, '');

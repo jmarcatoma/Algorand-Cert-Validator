@@ -20,7 +20,7 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 4000;
 
-const IPFS_GATEWAY_URL = (process.env.IPFS_GATEWAY_URL || 'http://192.168.101.194:8080').replace(/\/+$/, '');
+const IPFS_GATEWAY_URL = (process.env.IPFS_GATEWAY_URL || 'http://192.168.1.194:8080').replace(/\/+$/, '');
 const INDEXER_URL = (process.env.INDEXER_URL || 'https://mainnet-idx.algonode.cloud').replace(/\/+$/, '');
 
 const toJSONSafe = (x) =>
