@@ -9,7 +9,7 @@ import { create } from "ipfs-http-client";
  * IPFS_ENDPOINTS  = "http://192.168.1.194:9095,http://192.168.1.193:9095,..."
  * IPFS_API_URL    = fallback viejo (un solo nodo)
  */
-const IPFS_ENDPOINTS = (
+export const IPFS_ENDPOINTS = (
   process.env.IPFS_ENDPOINTS ||
   process.env.IPFS_API_URL ||
   "http://127.0.0.1:5001"
@@ -18,23 +18,13 @@ const IPFS_ENDPOINTS = (
   .map(s => s.trim())
   .filter(Boolean);
 
+export const IPFS_INDEX_IPNS_KEY = process.env.IPFS_INDEX_IPNS_KEY?.trim();
+
 if (!IPFS_ENDPOINTS.length) {
   console.warn("[IPFS] No hay endpoints configurados, usando http://127.0.0.1:5001");
   IPFS_ENDPOINTS.push("http://127.0.0.1:5001");
 }
 
-// Key IPNS que usaremos para publicar el root del índice
-// Debe existir en TODOS los nodos (ipfs key import algocert-index-key ...)
-const IPFS_INDEX_IPNS_KEY =
-  process.env.IPFS_INDEX_IPNS_KEY ||
-  process.env.CERT_INDEX_IPNS_KEY || // alias por si acaso
-  null;
-
-/**
- * Crea un cliente IPFS para un endpoint dado.
- * Si estás usando ipfs-cluster proxy, normalmente será http://host:9095.
- * El proxy y go-ipfs exponen la API en /api/v0.
- */
 function createClient(baseUrl) {
   const url = baseUrl.replace(/\/+$/, "") + "/api/v0";
   return create({ url });
@@ -67,17 +57,35 @@ async function withIpfs(fn) {
  * Se usa para leer CIDs (/ipfs/<cid>...) desde cualquier nodo vivo.
  */
 async function* catWithFailover(cid, opts) {
+  console.log(`[IPFS] catWithFailover iniciado para CID: ${cid}`);
+  console.log(`[IPFS] Endpoints disponibles: ${IPFS_ENDPOINTS.length}`, IPFS_ENDPOINTS);
+
   let lastErr;
-  for (const base of IPFS_ENDPOINTS) {
+  for (let i = 0; i < IPFS_ENDPOINTS.length; i++) {
+    const base = IPFS_ENDPOINTS[i];
     try {
+      console.log(`[IPFS] Intentando cat ${i + 1}/${IPFS_ENDPOINTS.length} en: ${base}`);
       const client = createClient(base);
+
+      let chunkCount = 0;
       for await (const chunk of client.cat(cid, opts)) {
+        chunkCount++;
         yield chunk;
       }
+      console.log(`[IPFS] ✅ cat exitoso en ${base} (${chunkCount} chunks)`);
       return; // terminó bien
     } catch (e) {
       lastErr = e;
-      console.error("[IPFS] cat falló en:", base, "-", e?.message || String(e));
+      console.error(`[IPFS] cat falló en: ${base} - ${e?.message || String(e)}`);
+      console.error(`[IPFS] Stack:`, e?.stack);
+
+      // Si es el último, throw
+      if (i === IPFS_ENDPOINTS.length - 1) {
+        console.error(`[IPFS] ❌ Todos los endpoints (${IPFS_ENDPOINTS.length}) fallaron en cat()`);
+        throw lastErr;
+      }
+
+      console.log(`[IPFS] → Probando siguiente endpoint...`);
       continue;
     }
   }
@@ -130,21 +138,45 @@ const ipfsFailover = {
 let currentWriter = null;  // { client, base }
 let lastSyncedCid = null;  // último rootCid con el que sincronizamos /cert-index
 
+/**
+ * Busca un nodo IPFS disponible consultando TODOS en paralelo.
+ * OPTIMIZADO: Usa Promise.race para obtener el primero que responda.
+ */
 async function pickWriter() {
-  let lastErr;
-  for (const base of IPFS_ENDPOINTS) {
+  console.log(`[IPFS-Writer] Buscando nodo disponible entre ${IPFS_ENDPOINTS.length} opciones...`);
+
+  // Crear promesas para todos los nodos en paralelo
+  const promises = IPFS_ENDPOINTS.map(async (base) => {
     try {
       const client = createClient(base);
-      await client.id(); // prueba rápida de salud
-      currentWriter = { client, base };
-      console.log("[IPFS-Writer] ✅ usando", base, "como writer MFS");
-      return currentWriter;
+      // Timeout de 2 segundos por nodo
+      await Promise.race([
+        client.id(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000))
+      ]);
+      return { client, base, success: true };
     } catch (e) {
-      lastErr = e;
-      console.warn("[IPFS-Writer] endpoint no disponible como writer:", base, "-", e?.message || String(e));
+      console.warn(`[IPFS-Writer] ${base} no disponible: ${e?.message || String(e)}`);
+      return { base, success: false, error: e };
     }
+  });
+
+  // Esperar a que al menos uno responda
+  const results = await Promise.all(promises);
+
+  // Buscar el primer nodo exitoso
+  const winner = results.find(r => r.success);
+
+  if (winner) {
+    currentWriter = { client: winner.client, base: winner.base };
+    console.log(`[IPFS-Writer] ✅ usando ${winner.base} como writer MFS`);
+    return currentWriter;
   }
-  throw lastErr || new Error("No hay writer IPFS disponible");
+
+  // Si ninguno funcionó
+  const errorMsg = `No hay writer IPFS disponible. Probados: ${IPFS_ENDPOINTS.join(', ')}`;
+  console.error(`[IPFS-Writer] ❌ ${errorMsg}`);
+  throw new Error(errorMsg);
 }
 
 async function getWriter() {
@@ -162,83 +194,32 @@ async function getWriter() {
 }
 
 /**
- * Sincroniza /cert-index en el writer actual con el rootCid publicado por IPNS
- * (si existe). Si no hay IPNS configurado o no hay publicación previa,
- * simplemente se asegura de que /cert-index exista.
+ * Asegura que /cert-index existe en el writer actual.
+ * SIMPLIFICADO: Systemd maneja la sincronización IPNS al inicio del nodo.
+ * Esta función solo verifica que el índice exista.
  */
 async function ensureIndexMfsSyncedForWriter() {
   const { client, base } = await getWriter();
 
-  // Caso 1: sin IPNS configurado, nos limitamos a tener /cert-index creado
-  if (!IPFS_INDEX_IPNS_KEY) {
-    try {
-      await client.files.stat("/cert-index");
-    } catch (e) {
-      const msg = e?.message || String(e || "");
-      if (/does not exist|no such file/i.test(msg)) {
-        await client.files.mkdir("/cert-index", { parents: true });
-        console.log("[MFS] /cert-index creado en", base, "(sin IPNS)");
-      } else {
-        console.warn("[MFS] stat /cert-index falló en", base, "-", msg);
-      }
-    }
-    return { client, base, rootCid: null, syncedFromIpns: false };
-  }
-
-  // Caso 2: con IPNS => IPNS es la verdad global
-  let ipnsCid = null;
+  // Solo asegurar que /cert-index existe
+  // La sincronización IPNS la maneja systemd al inicio
   try {
-    const res = await client.name.resolve(`/ipns/${IPFS_INDEX_IPNS_KEY}`);
-    const path = res.Path || res.path || "";
-    const m = path.match(/\/ipfs\/([^/]+)/);
-    if (m) ipnsCid = m[1];
+    await client.files.stat("/cert-index");
+    // Índice existe, todo bien
   } catch (e) {
-    console.warn("[IPNS] No se pudo resolver /ipns/" + IPFS_INDEX_IPNS_KEY + " en", base, "-", e?.message || String(e));
-  }
-
-  // Si no hay publicación previa en IPNS, sólo aseguramos /cert-index
-  if (!ipnsCid) {
-    try {
-      await client.files.stat("/cert-index");
-    } catch (e) {
-      const msg = e?.message || String(e || "");
-      if (/does not exist|no such file/i.test(msg)) {
-        await client.files.mkdir("/cert-index", { parents: true });
-        console.log("[MFS] /cert-index creado en", base, "(IPNS aún sin root)");
-      } else {
-        console.warn("[MFS] stat /cert-index falló en", base, "-", msg);
-      }
+    const msg = e?.message || String(e || "");
+    if (/does not exist|no such file/i.test(msg)) {
+      // Crear estructura básica si no existe
+      await client.files.mkdir("/cert-index", { parents: true });
+      await client.files.mkdir("/cert-index/by-hash", { parents: true });
+      await client.files.mkdir("/cert-index/by-owner", { parents: true });
+      console.log("[MFS] ✅ /cert-index creado en", base);
+    } else {
+      console.warn("[MFS] stat /cert-index falló en", base, "-", msg);
     }
-    return { client, base, rootCid: null, syncedFromIpns: false };
   }
 
-  // Si ya sincronizamos este CID en este proceso, no hacemos nada
-  if (lastSyncedCid === ipnsCid) {
-    return { client, base, rootCid: ipnsCid, syncedFromIpns: true };
-  }
-
-  // Comparamos el CID local de /cert-index con el de IPNS
-  let localCid = null;
-  try {
-    const st = await client.files.stat("/cert-index", { hash: true });
-    localCid = (st.cid || st.hash || "").toString();
-  } catch (e) {
-    // no existe /cert-index -> forzamos clon
-  }
-
-  if (localCid !== ipnsCid) {
-    console.warn(`[MFS] /cert-index en ${base} desfasado (${localCid} != ${ipnsCid}), re-sincronizando...`);
-    try {
-      await client.files.rm("/cert-index", { recursive: true });
-    } catch {
-      // ok si no existía
-    }
-    await client.files.cp(`/ipfs/${ipnsCid}`, "/cert-index");
-    console.log(`[MFS] /cert-index sincronizado desde /ipfs/${ipnsCid} en ${base}`);
-  }
-
-  lastSyncedCid = ipnsCid;
-  return { client, base, rootCid: ipnsCid, syncedFromIpns: true };
+  return { client, base };
 }
 
 /* ------------------------------------------------------------------
@@ -382,21 +363,49 @@ async function mfsMove(from, to) {
  * 2) Si no hay IPNS o falla, hace fallback a /cert-index en el writer MFS.
  */
 async function getRootCid() {
-  // 1) Intento vía IPNS (lectura global, no depende del writer)
-  if (IPFS_INDEX_IPNS_KEY) {
+  // 1) PRIMERO: Intentar MFS local del WRITER ACTUAL si existe
+  // Esto garantiza que leemos lo que acabamos de escribir (read-your-writes)
+  if (currentWriter) {
     try {
-      const res = await withIpfs(c => c.name.resolve(`/ipns/${IPFS_INDEX_IPNS_KEY}`));
-      const path = res.Path || res.path || "";
-      const m = path.match(/\/ipfs\/([^/]+)/);
-      if (m && m[1]) {
-        return m[1];
-      }
+      console.log(`[getRootCid] Intentando leer de writer activo: ${currentWriter.base}`);
+      const st = await currentWriter.client.files.stat("/cert-index", { hash: true });
+      const cid = (st.cid || st.hash || "").toString();
+      if (cid) return cid;
     } catch (e) {
-      console.warn("[IPNS] No se pudo resolver rootCid vía IPNS; fallback a MFS:", e?.message || String(e));
+      console.warn("[getRootCid] Falló lectura en currentWriter:", e.message);
     }
   }
 
-  // 2) Fallback: CID local de /cert-index en el writer
+  // 2) Si no hay writer activo, intentar con el primer endpoint (lectura normal)
+  try {
+    const localClient = create(IPFS_ENDPOINTS[0]);
+    const st = await localClient.files.stat("/cert-index", { hash: true });
+    const cid = (st.cid || st.hash || "").toString();
+    if (cid) {
+      return cid;
+    }
+  } catch (e) {
+    // Ignoramos error si no existe localmente y vamos a IPNS
+  }
+
+  // 3) TERCERO: IPNS (lectura global / fallback)
+  if (IPFS_INDEX_IPNS_KEY) {
+    try {
+      // Usamos el cliente local para resolver IPNS
+      const client = create(IPFS_ENDPOINTS[0]);
+      const stream = client.name.resolve(`/ipns/${IPFS_INDEX_IPNS_KEY}`);
+      for await (const name of stream) {
+        const m = name.match(/\/ipfs\/([^/]+)/);
+        if (m && m[1]) {
+          return m[1];
+        }
+      }
+    } catch (e) {
+      console.warn("[IPNS] No se pudo resolver rootCid vía IPNS; fallback a MFS writer sync:", e?.message || String(e));
+    }
+  }
+
+  // 4) Fallback final: Forzar sync del writer (si no se pudo leer arriba)
   const { client } = await ensureIndexMfsSyncedForWriter();
   const st = await client.files.stat("/cert-index", { hash: true });
   const cid = (st.cid || st.hash || "").toString();
@@ -411,39 +420,38 @@ async function getRootCid() {
  *  - Si hay IPNS_KEY => name.publish(/ipfs/<cid>) con esa key
  */
 async function publishIndexRoot() {
-  const { client, base } = await ensureIndexMfsSyncedForWriter();
-
+  // Ensure we have a fresh client and obtain the /cert-index stat
+  const { client } = await ensureIndexMfsSyncedForWriter();
   const st = await client.files.stat("/cert-index", { hash: true });
+  // ... código existente ...
+
   const cid = (st.cid || st.hash || "").toString();
   if (!cid) throw new Error("No se pudo obtener CID de /cert-index");
-
-  // 1) Pin global (si estamos hablando con ipfs-cluster proxy, esto dispara el pin en el cluster)
+  // Pin en cluster
   try {
     if (client.pin && client.pin.add) {
       await client.pin.add(cid);
-      console.log("[IPFS] rootCid pineado en cluster:", cid, "vía", base);
-    } else {
-      console.warn("[IPFS] client.pin.add no disponible; omitiendo pin explícito (puede que cluster ya maneje esto).");
+      console.log("[IPFS] rootCid pineado en cluster:", cid);
     }
   } catch (e) {
-    console.warn("[IPFS] pin.add(rootCid) falló (se continúa igualmente):", e?.message || String(e));
+    console.warn("[IPFS] pin.add falló:", e?.message);
   }
-
-  // 2) Publicar en IPNS (si está configurado)
+  // Publicar en IPNS
   if (IPFS_INDEX_IPNS_KEY) {
     try {
       await client.name.publish(`/ipfs/${cid}`, {
         key: IPFS_INDEX_IPNS_KEY,
-        // lifetime: '8760h',     // opcional (1 año)
-        // allowOffline: true,    // opcional si el nodo es offline friendly
       });
       console.log(`[IPNS] Publicado /ipns/${IPFS_INDEX_IPNS_KEY} -> /ipfs/${cid}`);
-      lastSyncedCid = cid; // lo que acabamos de publicar es el nuevo root
+
+      // NUEVO: Delay post-publish para propagación
+      console.log("[IPNS] Esperando 2s para propagación...");
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      console.log("[IPNS] ✅ Propagación completa");
     } catch (e) {
-      console.warn("[IPNS] publish falló:", e?.message || String(e));
+      console.warn("[IPNS] publish falló:", e?.message);
     }
   }
-
   return cid;
 }
 

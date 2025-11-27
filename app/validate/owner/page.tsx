@@ -7,12 +7,13 @@ import { Button } from "@/components/ui/button"
 import { Table, Tbody, Td, Th, Thead, Tr } from "@/components/ui/table" // si no tienes tabla, puedes renderizar divs
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { AlertCircle, Link as LinkIcon, Download } from "lucide-react"
+import { openIpfsWithFailover } from "@/app/lib/ipfs-failover"
 
 export default function OwnerSearchPage() {
   const [owner, setOwner] = useState("")
   const [busy, setBusy] = useState(false)
-  const [items, setItems] = useState<Array<{hash:string, txid:string, pdf_cid:string, timestamp:string, title?:string|null}>>([])
-  const [error, setError] = useState<string| null>(null)
+  const [items, setItems] = useState<Array<{ hash: string, txid: string, pdf_cid: string, timestamp: string, title?: string | null }>>([])
+  const [error, setError] = useState<string | null>(null)
 
   const onSearch = async () => {
     setError(null)
@@ -30,19 +31,19 @@ export default function OwnerSearchPage() {
         return
       }
       setItems(j?.items || [])
-    } catch (e:any) {
+    } catch (e: any) {
       setError(e?.message || "Error de red")
     } finally {
       setBusy(false)
     }
   }
 
-  const abrirTx = (txid:string) => {
+  const abrirTx = (txid: string) => {
     window.open(`https://explorer.perawallet.app/tx/${txid}`, "_blank")
   }
 
-  const abrirIPFS = (cid:string) => {
-    window.open(`http://192.168.1.194:8080/ipfs/${cid}`, "_blank")
+  const abrirIPFS = (cid: string) => {
+    openIpfsWithFailover(cid)
   }
 
   return (

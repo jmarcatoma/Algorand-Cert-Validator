@@ -13,6 +13,8 @@ import {
   AlertDialogFooter
 } from "@/components/ui/alert-dialog"
 import { Upload, X, Download, Link as LinkIcon } from "lucide-react"
+import { openIpfsWithFailover } from "@/app/lib/ipfs-failover"
+import { downloadWithFailover } from "@/app/lib/api-failover"
 
 async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
   const hash = await crypto.subtle.digest("SHA-256", bytes)
@@ -22,7 +24,6 @@ async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
 
 const API_BASE = (process.env.NEXT_PUBLIC_API_BASE || "http://localhost:4000").replace(/\/+$/, "")
 const ALGO_EXPLORER_BASE = (process.env.NEXT_PUBLIC_ALGO_EXPLORER_BASE || "https://explorer.perawallet.app").replace(/\/+$/, "")
-const IPFS_GATEWAY_BASE = (process.env.NEXT_PUBLIC_IPFS_GATEWAY || "http://192.168.1.194:8080").replace(/\/+$/, "")
 
 type AlertKind = null | "success" | "duplicate" | "error"
 
@@ -38,7 +39,7 @@ export default function CertificadoUpload({ wallet }: { wallet: string }) {
   const [round, setRound] = useState<number | null>(null)
   const [confirmedBy, setConfirmedBy] = useState<'algod' | 'indexer-sdk' | 'indexer-rest' | 'unknown' | null>(null)
   const [pending, setPending] = useState(false)
-  
+
 
   const calcularHash = async (f: File) => {
     const buffer = await f.arrayBuffer()
@@ -59,9 +60,9 @@ export default function CertificadoUpload({ wallet }: { wallet: string }) {
 
   const descargar = () => {
     if (!hash) return
-    //window.open(`${API_BASE}/api/certificados/${hash}/download`, "_blank")
-    window.open(`${API_BASE}/api/download/by-hash/${hash}`, "_blank")
-
+    // Si tenemos CID, descargar directamente desde IPFS
+    // Sino, buscar CID usando el hash
+    downloadWithFailover(`/api/download/by-hash/${hash}`, cid)
   }
 
   const abrirExplorer = () => {
@@ -69,7 +70,7 @@ export default function CertificadoUpload({ wallet }: { wallet: string }) {
   }
 
   const abrirIpfs = () => {
-    if (cid) window.open(`${IPFS_GATEWAY_BASE}/ipfs/${cid}`, "_blank")
+    if (cid) openIpfsWithFailover(cid)
   }
 
   const handleSubmit = async () => {
@@ -249,8 +250,8 @@ export default function CertificadoUpload({ wallet }: { wallet: string }) {
               {alertType === "success"
                 ? "✅ Certificado registrado y anclado con éxito"
                 : alertType === "duplicate"
-                ? "⚠️ Certificado ya existente"
-                : "❌ Ocurrió un problema"}
+                  ? "⚠️ Certificado ya existente"
+                  : "❌ Ocurrió un problema"}
             </AlertDialogTitle>
 
             {/* 👇👇 FIX: usar asChild para que no renderice <p>, así podemos usar <div> dentro */}
@@ -275,8 +276,8 @@ export default function CertificadoUpload({ wallet }: { wallet: string }) {
                           <> <span className="mx-2">•</span>
                             <span className="italic">
                               confirmado por {confirmedBy === 'algod' ? 'Algod' :
-                                              confirmedBy === 'indexer-sdk' ? 'Indexer (SDK)' :
-                                              confirmedBy === 'indexer-rest' ? 'Indexer (REST)' : '—'}
+                                confirmedBy === 'indexer-sdk' ? 'Indexer (SDK)' :
+                                  confirmedBy === 'indexer-rest' ? 'Indexer (REST)' : '—'}
                             </span>
                           </>
                         )}

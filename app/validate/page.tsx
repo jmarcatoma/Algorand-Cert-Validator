@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { AlertCircle, CheckCircle2, Upload, Link as LinkIcon, Download } from "lucide-react"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { openIpfsWithFailover } from "@/app/lib/ipfs-failover"
 
 // Helpers
 async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
@@ -37,6 +38,7 @@ type ValidateDetails = {
   version?: "v1" | "v2" | string | null
   // NUEVO:
   processAtLocal?: string | null
+  source?: string
 }
 
 export default function ValidatePage() {
@@ -69,8 +71,7 @@ export default function ValidatePage() {
       const data = await resp.json()
 
       const source = data?.source || (data?.meta ? 'ipfs-index' : 'indexer-lookup');
-      console.log('validate source:', source);
-
+      console.log('validate source:', source, data);
 
       if (!resp.ok) {
         setResult({
@@ -84,33 +85,63 @@ export default function ValidatePage() {
         return
       }
 
-      // ok === true
-      const idx = data.indexer || {}
-      const parsed = idx.parsed || {}
       const matches = !!data.matches
 
-      const wallet = parsed.wallet || idx.from || null
-      const cid = parsed.cid || null
-      const txId = idx.txId  || null
-      const round = idx.round  ?? null
-      const processAtLocal = idx?.dates?.processAtLocal || null
+      // Extraer datos según la fuente
+      let wallet = null
+      let cid = null
+      let tipo = null
+      let nombre = null
+      let txId = null
+      let round = null
+      let processAtLocal = null
+      let version = null
+      let onchainNoteMatches = false
+
+      if (source === 'ipfs-only' && data.meta) {
+        // Caso: Solo IPFS (indexer falló)
+        wallet = data.meta.wallet || null
+        cid = data.meta.pdf_cid || data.meta.cid || null
+        tipo = data.meta.title || null
+        nombre = data.meta.owner || null
+        version = data.meta.version || null
+        txId = data.meta.txid || null
+        processAtLocal = data.meta.timestamp || null
+        onchainNoteMatches = false
+
+        // No hay round ni processAtLocal porque no se pudo verificar en indexer
+      } else if (data.indexer) {
+        // Caso: Indexer + IPFS (verificación completa)
+        const idx = data.indexer
+        const parsed = idx.parsed || {}
+        wallet = parsed.wallet || idx.from || null
+        cid = parsed.cid || null
+        tipo = parsed.tipo || null
+        nombre = parsed.nombre || null
+        txId = idx.txId || null
+        round = idx.round ?? null
+        processAtLocal = idx?.dates?.processAtLocal || null
+        version = parsed.version || null
+
+      }
 
       setResult({
         valid: matches,
-        message: data.message || (matches ? "Certificado verificado." : "La nota on-chain no coincide con el hash."),
+        message: data.message || (matches ? "Certificado verificado." : "No se pudo verificar completamente."),
         details: {
           filename: file.name,
           hashHex,
           wallet,
           cid,
-          tipo: parsed.tipo || null,
-          nombre: parsed.nombre || null,
+          tipo,
+          nombre,
           txId,
           round,
           onchainNoteMatches: matches,
           ipfsAvailable: !!cid,
-          version: parsed.version || null,
+          version,
           processAtLocal,
+          source, // Incluir source para debugging
         },
       })
     } catch (e) {
@@ -126,14 +157,13 @@ export default function ValidatePage() {
 
   const abrirTxEnExplorer = () => {
     const txId = result?.details?.txId;
-    if (txId) 
+    if (txId)
       window.open(`${ALGO_EXPLORER_BASE}/tx/${txId}`, "_blank");
-    }
+  }
 
   const abrirEnIPFS = () => {
     const cid = result?.details?.cid;
-    if (cid) 
-      window.open(`${IPFS_GATEWAY_BASE}/ipfs/${cid}`, "_blank");
+    if (cid) openIpfsWithFailover(cid);
   }
 
   return (

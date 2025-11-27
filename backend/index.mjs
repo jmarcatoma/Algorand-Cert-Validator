@@ -7,13 +7,17 @@ import dotenv from 'dotenv';
 import fs from 'fs';
 import pool from './db.mjs';
 import algosdk from 'algosdk';
+import { create as createIpfsClient } from 'ipfs-http-client';
 
 // --- IPFS helpers e índice ---
 import ipfs, {
   normalizeOwnerName, shardPrefix, keyPrefixFromOwner,
   ensureMfsDirs, mfsReadJsonOrNull, mfsWriteJson, mfsMove,
-  getRootCid, publishIndexRoot
+  getRootCid, publishIndexRoot,
+  IPFS_ENDPOINTS
 } from './indexing.mjs';
+
+import { getStickyAlgodClient, lookupTransactionByID } from './algorand-failover.mjs';
 
 dotenv.config();
 
@@ -27,7 +31,7 @@ const toJSONSafe = (x) =>
   JSON.parse(JSON.stringify(x, (_, v) => (typeof v === 'bigint' ? v.toString() : v)));
 
 // ---------- ALGOD client ----------
-const ALGOD_URL   = process.env.ALGOD_URL || 'http://127.0.0.1:4001';
+const ALGOD_URL = process.env.ALGOD_URL || 'http://127.0.0.1:4001';
 const ALGOD_TOKEN = process.env.ALGOD_TOKEN || '';
 
 const u = new URL(ALGOD_URL);
@@ -60,7 +64,7 @@ if (MNEMONIC) {
 
 // Ventanas de búsqueda (solo para indexer por hash)
 const IDX_LOOKBACK_HOURS = Math.max(1, Number(process.env.IDX_LOOKBACK_HOURS || '1'));
-const IDX_AHEAD_HOURS    = Math.max(0, Number(process.env.IDX_AHEAD_HOURS    || '1'));
+const IDX_AHEAD_HOURS = Math.max(0, Number(process.env.IDX_AHEAD_HOURS || '1'));
 
 // ---------- INDEXER client (SDK) ----------
 const indexerClient = new algosdk.Indexer('', INDEXER_URL, '');
@@ -224,15 +228,15 @@ function parseAlgocertNote(noteUtf8, fallbackWallet = null) {
   };
 
   if (version === 'v1') { // ALGOCERT|v1|hash|cid|wallet|ts
-    out.cid    = p[3] || null;
+    out.cid = p[3] || null;
     out.wallet = p[4] || fallbackWallet || null;
-    out.ts     = p[5] ? Number(p[5]) : null;
+    out.ts = p[5] ? Number(p[5]) : null;
   } else if (version === 'v2') { // ALGOCERT|v2|hash|cid|tipo|ownerName|wallet|ts
-    out.cid    = p[3] || null;
-    out.tipo   = p[4] || null;
+    out.cid = p[3] || null;
+    out.tipo = p[4] || null;
     out.nombre = p[5] || null;
     out.wallet = p[6] || fallbackWallet || null;
-    out.ts     = p[7] ? Number(p[7]) : null; // <-- FIX aquí
+    out.ts = p[7] ? Number(p[7]) : null; // <-- FIX aquí
   }
   return out;
 }
@@ -415,7 +419,7 @@ async function buildSuggestedParams(algod) {
   const p = await algod.getTransactionParams().do();
   // Normalizamos y CAP de 1000 rondas
   const first = Number(p.firstRound ?? p['first-round']);
-  const last  = first + 1000; // <= CAP recomendado
+  const last = first + 1000; // <= CAP recomendado
 
   return {
     fee: Number(p.minFee ?? p.fee ?? 1000),
@@ -495,7 +499,7 @@ app.post('/subir-certificado', upload.single('file'), async (req, res) => {
     return res.json({ ok: true, cid, hash });
   } catch (err) {
     console.error('❌ Error en /subir-certificado (IPFS-only):', err);
-    try { if (file?.path) fs.unlinkSync(file.path); } catch {}
+    try { if (file?.path) fs.unlinkSync(file.path); } catch { }
     return res.status(500).json({ error: 'Error al subir el certificado a IPFS' });
   }
 });
@@ -535,7 +539,7 @@ app.post('/guardar-titulo', upload.single('file'), async (req, res) => {
     const serverHashHex = crypto.createHash('sha256').update(buffer).digest('hex').toLowerCase();
 
     // Limpia el temp file en cualquier caso
-    try { fs.unlinkSync(file.path); } catch {}
+    try { fs.unlinkSync(file.path); } catch { }
 
     // 2) (Opcional) Verificar duplicado en el ÍNDICE publicado
     //    Si ya está publicado por-hash, cortamos con 409 para que el front no repita el proceso.
@@ -714,12 +718,12 @@ app.post('/api/algod/anchorNoteUpload', express.json(), async (req, res) => {
     if (!serverAcct) return res.status(501).json({ error: 'Server signer no configurado' });
 
     let { to, hashHex, cid, tipo, nombreCert, filename } = req.body || {};
-    to         = String(to || '').trim();
-    hashHex    = String(hashHex || '').trim().toLowerCase();
-    cid        = String(cid || '').trim();
-    tipo       = String(tipo || '').trim();
+    to = String(to || '').trim();
+    hashHex = String(hashHex || '').trim().toLowerCase();
+    cid = String(cid || '').trim();
+    tipo = String(tipo || '').trim();
     nombreCert = String(nombreCert || '').trim();
-    filename   = (String(filename || '').trim()).slice(0, 128);
+    filename = (String(filename || '').trim()).slice(0, 128);
 
     if (!algosdk.isValidAddress(to)) return res.status(400).json({ error: `to inválido: ${to}` });
     if (!/^[0-9a-f]{64}$/.test(hashHex)) return res.status(400).json({ error: 'hashHex inválido (64 hex chars)' });
@@ -730,11 +734,12 @@ app.post('/api/algod/anchorNoteUpload', express.json(), async (req, res) => {
     const clean = (s, max = 160) => s.replace(/\|/g, ' ').slice(0, max);
     const ts = Date.now();
 
-    const noteStr = `ALGOCERT|v2|${hashHex}|${cid}|${clean(tipo,64)}|${clean(nombreCert,160)}|${to}|${ts}`;
+    const noteStr = `ALGOCERT|v2|${hashHex}|${cid}|${clean(tipo, 64)}|${clean(nombreCert, 160)}|${to}|${ts}`;
     const note = new Uint8Array(Buffer.from(noteStr, 'utf8'));
 
     // params frescos + flat fee segura
-    const raw = await algodClient.getTransactionParams().do();
+    const { client } = await getStickyAlgodClient();
+    const raw = await client.getTransactionParams().do();
     const sp = { ...raw, flatFee: true, fee: Math.max(Number(raw.minFee || raw.fee || 1000), 1000) };
 
     const txn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({
@@ -854,7 +859,7 @@ app.get('/api/certificados/:hash/download', async (req, res) => {
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="${(nombre_archivo || `documento-${hash.slice(0,8)}`).replace(/"/g,'')}.pdf"`
+      `attachment; filename="${(nombre_archivo || `documento-${hash.slice(0, 8)}`).replace(/"/g, '')}.pdf"`
     );
 
     for await (const chunk of ipfs.cat(cid)) {
@@ -1129,8 +1134,8 @@ app.get('/api/validate-lite/hash/:hash', async (req, res) => {
 app.get('/api/indexer/lookup-by-hash', async (req, res) => {
   try {
     const hashHex = String(req.query.hashHex || '').trim().toLowerCase();
-    const wallet  = String(req.query.wallet  || '').trim();
-    const role    = String(req.query.role    || '').trim();
+    const wallet = String(req.query.wallet || '').trim();
+    const role = String(req.query.role || '').trim();
 
     const afterHours = req.query.afterHours != null
       ? Math.max(1, Number(req.query.afterHours))
@@ -1145,7 +1150,7 @@ app.get('/api/indexer/lookup-by-hash', async (req, res) => {
     }
 
     const now = Date.now();
-    const afterIso  = new Date(now - afterHours * 3600e3).toISOString();
+    const afterIso = new Date(now - afterHours * 3600e3).toISOString();
     const beforeIso = new Date(now + aheadHours * 3600e3).toISOString();
 
     const tryVersion = async (ver) => {
@@ -1203,7 +1208,7 @@ app.get('/api/indexer/lookup-by-hash', async (req, res) => {
 
       // 2) REST
       try {
-        const url = new URL(`${INDEXER_URL.replace(/\/+$/,'')}/v2/transactions`);
+        const url = new URL(`${INDEXER_URL.replace(/\/+$/, '')}/v2/transactions`);
         url.searchParams.set('note-prefix', prefixB64);
         url.searchParams.set('tx-type', 'pay');
         url.searchParams.set('after-time', afterIso);
@@ -1311,7 +1316,7 @@ app.post('/api/index/publish-hash', async (req, res) => {
 
     // Paths en MFS
     const stagingMetaPath = `/staging/by-hash/${shard}/${hash}.json`;
-    const finalMetaPath   = `/cert-index/by-hash/${shard}/${hash}.json`;
+    const finalMetaPath = `/cert-index/by-hash/${shard}/${hash}.json`;
 
     await ensureMfsDirs([`/staging/by-hash/${shard}`, `/cert-index/by-hash/${shard}`]);
     await mfsWriteJson(stagingMetaPath, meta);
@@ -1320,8 +1325,8 @@ app.post('/api/index/publish-hash', async (req, res) => {
     let ownerListPath = null;
     if (ownerNorm) {
       const stagingOwnerDir = `/staging/by-owner/${ownerPrefix}`;
-      const finalOwnerDir   = `/cert-index/by-owner/${ownerPrefix}`;
-      ownerListPath         = `${finalOwnerDir}/${ownerNorm}.json`;
+      const finalOwnerDir = `/cert-index/by-owner/${ownerPrefix}`;
+      ownerListPath = `${finalOwnerDir}/${ownerNorm}.json`;
       const stagingOwnerListPath = `${stagingOwnerDir}/${ownerNorm}.json`;
 
       await ensureMfsDirs([stagingOwnerDir, finalOwnerDir]);
@@ -1438,7 +1443,7 @@ app.get('/api/download/by-hash/:hash', async (req, res) => {
 
     // 2) Nombre archivo (no guardamos filename en meta; proponemos uno)
     const filename =
-      `cert-${(meta?.owner || 'owner').toString().replace(/[^A-Z0-9]+/gi, '_')}-${h.slice(0,8)}.pdf`;
+      `cert-${(meta?.owner || 'owner').toString().replace(/[^A-Z0-9]+/gi, '_')}-${h.slice(0, 8)}.pdf`;
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -1503,6 +1508,48 @@ app.get('/api/download/by-cid/:cid', async (req, res) => {
     console.error('download by-cid error:', e);
     return res.status(502).json({ error: 'No se pudo descargar desde IPFS (by-cid)' });
   }
+});
+
+// GET /api/ipfs/diagnose - Diagnóstico de nodos IPFS
+app.get('/api/ipfs/diagnose', async (req, res) => {
+  const results = [];
+
+  for (const endpoint of IPFS_ENDPOINTS) {
+    try {
+      const client = createIpfsClient({ url: endpoint });
+      const start = Date.now();
+
+      // Test 1: Version
+      const version = await client.version();
+
+      // Test 2: CID del índice
+      let indexCid = null;
+      try {
+        const stat = await client.files.stat('/cert-index', { hash: true });
+        indexCid = (stat.cid || stat.hash || '').toString();
+      } catch (e) {
+        indexCid = `Error: ${e.message}`;
+      }
+
+      const elapsed = Date.now() - start;
+
+      results.push({
+        endpoint,
+        status: 'OK',
+        version: version.version,
+        indexCid,
+        responseTime: `${elapsed}ms`
+      });
+    } catch (e) {
+      results.push({
+        endpoint,
+        status: 'FAIL',
+        error: e.message
+      });
+    }
+  }
+
+  res.json({ nodes: results });
 });
 
 
