@@ -20,7 +20,10 @@ import ipfs, {
 import {
   getStickyAlgodClient,
   lookupTransactionByID,
-  indexerHealthCheck
+  indexerHealthCheck,
+  sendRawTransaction,
+  buildSuggestedParams,
+  waitForConfirmation
 } from './algorand-failover.mjs';
 
 dotenv.config();
@@ -130,9 +133,10 @@ async function sendAndConfirm({ to, amount = 0, note }, signer, { confirmWith = 
 
 // ---------- Confirmación con preferencia ALGOD y fallback INDEXER ----------
 // ---------- Confirmación con preferencia ALGOD y fallback INDEXER ----------
-async function confirmRoundWithFallback({ algod, txId, waitSeconds = 12 }) {
-  // 1) ALGOD (local)
+async function confirmRoundWithFallback({ txId, waitSeconds = 12 }) {
+  // 1) ALGOD (sticky failover)
   try {
+    const { client: algod } = await getStickyAlgodClient();
     const start = Date.now();
     let lastRound = (await algod.status().do())['last-round'];
     while ((Date.now() - start) / 1000 < waitSeconds) {
@@ -150,7 +154,7 @@ async function confirmRoundWithFallback({ algod, txId, waitSeconds = 12 }) {
       await algod.statusAfterBlock(lastRound).do();
     }
   } catch (e) {
-    console.warn(`[Confirm] Algod local falló o timeout (${waitSeconds}s), intentando Indexer failover...`);
+    console.warn(`[Confirm] Algod sticky falló o timeout (${waitSeconds}s), intentando Indexer failover...`);
   }
 
   // 2) INDEXER Failover (usa algorand-failover.mjs)
@@ -648,7 +652,8 @@ app.post('/api/algod/anchorNote', express.json(), async (req, res) => {
 
     let txId;
     try {
-      const rLocal = await algodClient.sendRawTransaction(stxn).do();
+      // Usar sendRawTransaction con failover
+      const rLocal = await sendRawTransaction(stxn);
       txId = rLocal.txId;
     } catch (e) {
       const poolError = e?.response?.body?.message || e?.message || String(e);
@@ -725,10 +730,8 @@ app.post('/api/algod/anchorNoteUpload', express.json(), async (req, res) => {
     const noteStr = `ALGOCERT|v2|${hashHex}|${cid}|${clean(tipo, 64)}|${clean(nombreCert, 160)}|${to}|${ts}`;
     const note = new Uint8Array(Buffer.from(noteStr, 'utf8'));
 
-    // params frescos + flat fee segura
-    const { client } = await getStickyAlgodClient();
-    const raw = await client.getTransactionParams().do();
-    const sp = { ...raw, flatFee: true, fee: Math.max(Number(raw.minFee || raw.fee || 1000), 1000) };
+    // params frescos + flat fee segura (usa failover)
+    const sp = await buildSuggestedParams();
 
     const txn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({
       from: serverAcct.addr,
@@ -742,7 +745,8 @@ app.post('/api/algod/anchorNoteUpload', express.json(), async (req, res) => {
 
     let txId;
     try {
-      const rLocal = await algodClient.sendRawTransaction(stxn).do();
+      // Usar sendRawTransaction con failover
+      const rLocal = await sendRawTransaction(stxn);
       txId = rLocal.txId;
     } catch (e) {
       const poolError = e?.response?.body?.message || e?.message || String(e);
