@@ -1,66 +1,87 @@
+################################################################################
+# CONFIGURACIÓN BACKEND - SISTEMA DE CERTIFICADOS ALGORAND
+################################################################################
 
-# Datos de conexión a PostgreSQL
+#===============================================================================
+# 1. BASE DE DATOS POSTGRESQL
+#===============================================================================
 PGHOST=localhost
 PGUSER=postgres
 PGPASSWORD=admin
 PGDATABASE=certificados_db
 PGPORT=5432
 
-#Backend
-# Puerto donde correrá el backend
+#===============================================================================
+# 2. SERVIDOR BACKEND
+#===============================================================================
 PORT=4000
-# Clave de API para proteger rutas (puedes cambiarla)
 ADMIN_KEY=1234567
+# Wallet administrador del sistema
+ADMIN_WALLET=WF7545X4CNPWV2XUIJ6VSA47Q37WEYVLZCZCEGO72DDNK2RZEVMNBXV2IE
 
-const ADMIN_WALLET = "WF7545X4CNPWV2XUIJ6VSA47Q37WEYVLZCZCEGO72DDNK2RZEVMNBXV2IE";
+#===============================================================================
+# 3. ALGORAND - NODOS ALGOD (con failover)
+#===============================================================================
+# Formato: URL:TOKEN,URL:TOKEN,...
+ALGOD_NODES=http://192.168.1.190:4001:77eeca1064bb201a8646ccc2a49d548a1d8c3d8c2bc912c9bb950a64743c6272,http://192.168.1.189:4001:77eeca1064bb201a8646ccc2a49d548a1d8c3d8c2bc912c9bb950a64743c6272
 
-#DATABASE_URL=postgresql://postgres:1234567@localhost:5433/certificados_db
-
-# Algorand node (NodeKit en tu VM)
-ALGOD_URL=http://192.168.1.190:4001
-ALGOD_TOKEN=77eeca1064bb201a8646ccc2a49d548a1d8c3d8c2bc912c9bb950a64743c6272
-
-# principal
-INDEXER_URL=https://mainnet-idx.algonode.cloud
-# fallback en cadena (coma-separados)
+#===============================================================================
+# 4. ALGORAND - INDEXERS (con failover)
+#===============================================================================
+# Múltiples indexers separados por comas (privados primero, públicos después)
 INDEXER_URLS=https://mainnet-idx.algonode.cloud,https://mainnet-idx.4160.nodely.dev,https://algoexplorerapi.io/idx2
 
-# IPFS (sin slash al final es opcional; lo normalizamos igual)
-NEXT_PUBLIC_IPFS_GATEWAY=http://192.168.1.194:8080
+# Configuración de ventana temporal para búsquedas
+IDX_LOOKBACK_HOURS=2
+IDX_AHEAD_HOURS=2
 
-# (Opcional) Explorador de transacciones
-# Ejemplos:
-# NEXT_PUBLIC_ALGO_EXPLORER_BASE=https://algoexplorer.io
-NEXT_PUBLIC_ALGO_EXPLORER_BASE=https://explorer.perawallet.app
+#===============================================================================
+# 5. IPFS - NODOS (con failover)
+#===============================================================================
+# Endpoints del cluster IPFS (puerto 9095 = ipfs-cluster proxy)
+IPFS_ENDPOINTS=http://192.168.1.194:9095,http://192.168.1.193:9095,http://192.168.1.192:9095
 
-NOTE_PREFIX=ALGOCERT1
-
-# Solo para pruebas (firma en backend). En prod: firma la wallet del cliente.
-SENDER_MNEMONIC=""
-SENDER_ADDRESS=""
-ALGOD_MNEMONIC=lawn pill wage situate camera buddy off hero attack print cherry protect again salad oxygen erase multiply response say rare seed enroll whip absorb payment
-# Indexer (en tu VM; ajusta puerto si usaste otro)
-#INDEXER_URL=http://192.168.101.190:8980
-#INDEXER_TOKEN=   # en blanco si no configuraste token
-
-# ventana por defecto (en HORAS)
-IDX_LOOKBACK_HOURS=2     # cuánto mirar hacia atrás (default 1h)
-IDX_AHEAD_HOURS=2        # margen hacia adelante (default 1h)
-
-
-# IPFS
+# API URL (usado por algunas funciones legacy)
 IPFS_API_URL=http://192.168.1.194:9095/api/v0
+
+# Gateway URL (usado por el backend para construir URLs públicas)
 IPFS_GATEWAY_URL=http://192.168.1.194:8080
 
-# Raíces de índice en MFS (no cambies las rutas salvo que lo decidas)
+#===============================================================================
+# 6. IPFS - ÍNDICE Y IPNS
+#===============================================================================
+# Raíz del índice en MFS
 CERT_INDEX_MFS_ROOT=/cert-index
 CERT_INDEX_SHARDS=2
 
-# Publicación por IPNS (opcional pero recomendado)
-# Si no tienes clave IPNS, deja vacío y trabajamos sólo con CID de root.
-CERT_INDEX_IPNS_KEY=algocert-index-key    # nombre de la key en 'ipfs key list' (opcional)
-# VALOR DE IPNS k51qzi5uqu5dhonp113olftb52kmnb3vo9nvyc20910k7nk1pgurprtwp3b0sb
-CERT_INDEX_CACHE_TTL_SEC=120              # cache en memoria del root CID
+# IPNS Key para publicación del índice
+CERT_INDEX_IPNS_KEY=algocert-index-key
+IPFS_INDEX_IPNS_KEY=k51qzi5uqu5dhonp113olftb52kmnb3vo9nvyc20910k7nk1pgurprtwp3b0sb
 
-# Si NO vas a usar IPNS todavía, puedes fijar el CID actual del índice:
-# CERT_INDEX_ROOT_CID=bafybeia...  # (opcional)
+# Cache del root CID en memoria
+CERT_INDEX_CACHE_TTL_SEC=120
+
+#===============================================================================
+# 7. FRONTEND - NEXT.JS VARIABLES
+#===============================================================================
+# IPFS Gateways (con failover en frontend)
+NEXT_PUBLIC_IPFS_GATEWAYS=http://192.168.1.194:8080,http://192.168.1.193:8080,http://192.168.1.192:8080
+
+# Backend APIs (con failover en frontend)
+NEXT_PUBLIC_API_BACKENDS=http://192.168.1.194:4000,http://192.168.1.193:4000,http://192.168.1.192:4000
+
+# Explorador de Algorand
+NEXT_PUBLIC_ALGO_EXPLORER_BASE=https://explorer.perawallet.app
+
+#===============================================================================
+# 8. ALGORAND - FIRMA (Solo para desarrollo/testing)
+#===============================================================================
+# IMPORTANTE: En producción, la wallet del cliente firma las transacciones
+NOTE_PREFIX=ALGOCERT1
+
+# Mnemonic del backend (solo para testing)
+ALGOD_MNEMONIC=lawn pill wage situate camera buddy off hero attack print cherry protect again salad oxygen erase multiply response say rare seed enroll whip absorb payment
+
+# Sender (legacy, solo si usas firma en backend)
+SENDER_MNEMONIC=
+SENDER_ADDRESS=

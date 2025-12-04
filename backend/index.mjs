@@ -17,7 +17,11 @@ import ipfs, {
   IPFS_ENDPOINTS
 } from './indexing.mjs';
 
-import { getStickyAlgodClient, lookupTransactionByID } from './algorand-failover.mjs';
+import {
+  getStickyAlgodClient,
+  lookupTransactionByID,
+  indexerHealthCheck
+} from './algorand-failover.mjs';
 
 dotenv.config();
 
@@ -67,8 +71,8 @@ const IDX_LOOKBACK_HOURS = Math.max(1, Number(process.env.IDX_LOOKBACK_HOURS || 
 const IDX_AHEAD_HOURS = Math.max(0, Number(process.env.IDX_AHEAD_HOURS || '1'));
 
 // ---------- INDEXER client (SDK) ----------
-const indexerClient = new algosdk.Indexer('', INDEXER_URL, '');
-console.log('[INDEXER_URL]', INDEXER_URL);
+// const indexerClient = new algosdk.Indexer('', INDEXER_URL, '');
+// console.log('[INDEXER_URL]', INDEXER_URL);
 
 // ---------- Middlewares ----------
 app.use(cors());
@@ -125,7 +129,8 @@ async function sendAndConfirm({ to, amount = 0, note }, signer, { confirmWith = 
 }
 
 // ---------- Confirmación con preferencia ALGOD y fallback INDEXER ----------
-async function confirmRoundWithFallback({ algod, indexerClient, INDEXER_URL, txId, waitSeconds = 12 }) {
+// ---------- Confirmación con preferencia ALGOD y fallback INDEXER ----------
+async function confirmRoundWithFallback({ algod, txId, waitSeconds = 12 }) {
   // 1) ALGOD (local)
   try {
     const start = Date.now();
@@ -145,44 +150,26 @@ async function confirmRoundWithFallback({ algod, indexerClient, INDEXER_URL, txI
       await algod.statusAfterBlock(lastRound).do();
     }
   } catch (e) {
-    // sigue a fallback
+    console.warn(`[Confirm] Algod local falló o timeout (${waitSeconds}s), intentando Indexer failover...`);
   }
 
-  // 2) INDEXER SDK
+  // 2) INDEXER Failover (usa algorand-failover.mjs)
   try {
-    const r = await indexerClient.lookupTransactionByID(txId).do();
+    // lookupTransactionByID ya maneja failover entre múltiples nodos/indexers
+    const r = await lookupTransactionByID(txId);
     const tx = r?.transaction || null;
     const cr = tx?.['confirmed-round'] || 0;
+
     if (cr > 0) {
       return {
         pending: false,
         round: cr,
-        confirmedBy: 'indexer-sdk',
-        providerInfo: { kind: 'indexer-sdk' },
+        confirmedBy: 'indexer-failover',
+        providerInfo: { kind: 'indexer-failover' },
       };
     }
   } catch (e) {
-    // sigue a fallback REST
-  }
-
-  // 3) INDEXER REST
-  try {
-    const url = `${INDEXER_URL.replace(/\/+$/, '')}/v2/transactions/${txId}`;
-    const r = await fetch(url);
-    if (r.ok) {
-      const j = await r.json();
-      const cr = j?.transaction?.['confirmed-round'] || 0;
-      if (cr > 0) {
-        return {
-          pending: false,
-          round: cr,
-          confirmedBy: 'indexer-rest',
-          providerInfo: { kind: 'indexer-rest' },
-        };
-      }
-    }
-  } catch (e) {
-    // sin confirmación
+    console.warn('[Confirm] Indexer failover también falló o no encontró la tx:', e.message);
   }
 
   // No confirmado aún
@@ -435,8 +422,9 @@ async function buildSuggestedParams(algod) {
 // ---------- Indexer quick health ----------
 app.get('/api/indexer/health', async (_req, res) => {
   try {
-    const h = await indexerClient.makeHealthCheck().do();
-    res.json({ ok: true, ...h });
+    // Usa el health check con failover
+    const h = await indexerHealthCheck();
+    res.json(h);
   } catch (e) {
     res.status(503).json({ ok: false, error: e?.message || String(e) });
   }
@@ -674,8 +662,8 @@ app.post('/api/algod/anchorNote', express.json(), async (req, res) => {
     // Confirmación: prefer ALGOD + fallback Indexer
     const conf = await confirmRoundWithFallback({
       algod: algodClient,
-      indexerClient,
-      INDEXER_URL,
+      // indexerClient ya no se pasa
+      // INDEXER_URL tampoco
       txId,
       waitSeconds: 20,
     });
@@ -768,8 +756,8 @@ app.post('/api/algod/anchorNoteUpload', express.json(), async (req, res) => {
     // Confirmación: prefer ALGOD + fallback Indexer
     const conf = await confirmRoundWithFallback({
       algod: algodClient,
-      indexerClient,
-      INDEXER_URL,
+      // indexerClient ya no se pasa
+      // INDEXER_URL tampoco
       txId,
       waitSeconds: 20,
     });

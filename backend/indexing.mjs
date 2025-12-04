@@ -123,7 +123,18 @@ async function* readWithFailover(path, opts) {
  * sino el writer flotante definido más abajo.
  */
 const ipfsFailover = {
-  add: (data, opts) => withIpfs(c => c.add(data, opts)),
+  add: (data, opts) => withIpfs(async (c) => {
+    const result = await c.add(data, opts);
+    // Si devuelve un async iterable (v50+), consumirlo para obtener el objeto final
+    if (result && result[Symbol.asyncIterator]) {
+      let last;
+      for await (const item of result) {
+        last = item;
+      }
+      return last;
+    }
+    return result;
+  }),
   cat: (cid, opts) => catWithFailover(cid, opts),
   files: {
     // sólo lectura con failover, por si lo necesitas en alguna otra parte
