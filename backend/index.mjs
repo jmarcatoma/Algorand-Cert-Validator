@@ -22,8 +22,8 @@ import {
   lookupTransactionByID,
   indexerHealthCheck,
   sendRawTransaction,
-  buildSuggestedParams,
-  waitForConfirmation
+  buildSuggestedParams as buildSuggestedParamsFailover,
+  waitForConfirmation as waitForConfirmationFailover
 } from './algorand-failover.mjs';
 
 dotenv.config();
@@ -731,7 +731,7 @@ app.post('/api/algod/anchorNoteUpload', express.json(), async (req, res) => {
     const note = new Uint8Array(Buffer.from(noteStr, 'utf8'));
 
     // params frescos + flat fee segura (usa failover)
-    const sp = await buildSuggestedParams();
+    const sp = await buildSuggestedParamsFailover();
 
     const txn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({
       from: serverAcct.addr,

@@ -1,0 +1,151 @@
+0. Descargar los binarios de IPFS
+0.1. Descargar la carpeta
+
+wget https://dist.ipfs.tech/kubo/v0.36.0/kubo_v0.36.0_linux-amd64.tar.gz
+
+0.2. Desempaquetar y entrar en la carpeta
+
+tar -xvzf kubo_v0.36.0_linux-amd64.tar.gz
+cd Kubo/
+
+0.3. Ejecutar el script de instalacion y verificar la instalacion de IPFS
+
+sudo bash install.sh
+ipfs --version
+
+0.4. Inicializar el repositorio considerando que se va hacer una red privada
+
+ipfs init
+cd /home/sebas/.ipfs
+
+
+
+
+🧩 1. Configuración de swarm.key en los 3 nodos
+
+En el nodo 1:
+
+# 2-a. Cabeceras fijas
+
+echo "/key/swarm/psk/1.0.0/\n/base16/\n$(tr -dc 'a-f0-9' < /dev/urandom | head -c 128)" > ~/.ipfs/swarm.key
+chmod 400 swarm.key
+
+
+# printf "/key/swarm/psk/1.0.0/\n/base16/\n" > swarm.key    (OTRA OPCION)
+# 2-b. 32 bytes aleatorios → hex → se añaden al fichero
+head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' >> swarm.key
+echo >> swarm.key   # salto de línea final
+chmod 400 swarm.key
+
+
+
+cat ~/.ipfs/swarm.key
+
+En nodos 2 y 3 (copiar el swarm.key generado en nodo 1)
+
+Borrar los bootstrap por defecto
+
+
+ipfs bootstrap rm --all
+
+
+
+🔗 2. Conexión entre nodos IPFS
+
+En cada nodo:
+
+Conectar entre ellos:
+ipfs bootstrap add /ip4/192.168.100.234/tcp/4001/p2p/<PeerID-nodo2>
+ipfs bootstrap add /ip4/192.168.100.234/tcp/4001/p2p/<PeerID-nodo3>
+
+Cambiar la direccion de anuncio en cada nodo dependiendo su ip:
+
+ipfs config --json Addresses.Announce '["/ip4/direccion_ipnodo1/tcp/4001"]'  --> en nodo1
+
+ipfs config --json Addresses.Announce '["/ip4/direccion_ipnodo2/tcp/4001"]'  --> en nodo2
+
+ipfs config --json Addresses.Announce '["/ip4/direccion_ipnodo3/tcp/4001"]'  --> en nodo3
+
+Verificar conexión:
+ipfs swarm peers
+
+🔐 3. Cluster: configuración del cluster_secret
+
+
+3.1. Descargar los archivos necesarios cluster-ctl y cluster-service
+
+wget https://dist.ipfs.tech/ipfs-cluster-service/v1.1.2/ipfs-cluster-service_v1.1.2_linux-amd64.tar.gz
+wget https://dist.ipfs.tech/ipfs-cluster-ctl/v1.1.2/ipfs-cluster-ctl_v1.1.2_linux-amd64.tar.gz
+
+3.2. Descomprimir
+
+tar -xzf ipfs-cluster-service_v1.1.2_linux-amd64.tar.gz
+tar -xzf ipfs-cluster-ctl_v1.1.2_linux-amd64.tar.gz
+
+3.3. Instalar
+
+sudo install -m 0755 ipfs-cluster-service/ipfs-cluster-service /usr/local/bin/
+sudo install -m 0755 ipfs-cluster-ctl/ipfs-cluster-ctl       /usr/local/bin/
+
+⚙️ 4. Poner la clave "secret" al cluster
+
+4.1. Crear la contraseña del cluster (Nodo1) y copiar para pegar en los otros nodos
+
+export CLUSTER_SECRET=$(openssl rand -hex 32)
+echo "$CLUSTER_SECRET"
+
+
+4.2. En los otros nodos pegar el secret
+
+export CLUSTER_SECRET=<pegar_el_secret_copiado_en_el_paso_anterior>
+
+4.3. En todos los nodos (Ahorita solo se muestra para el nodo 1)
+
+ipfs-cluster-service init
+
+nano ~/.ipfs-cluster/service.json
+"listen_multiaddress": "/ip4/direccion_ip_nodo1/tcp/9096",  // en el nodo 1
+
+ipfs cluster-service daemon &
+
+
+
+🤝 5. Conectar los nodos al cluster (bootstrapping)
+
+5.1. Revisar el archivo de configuracion
+
+nano ~/.ipfs-cluster/service.json
+
+5.2. Revisar que exista el apartado (Como ejemplo el nodo 1)
+
+ "bootstrap_peers": [
+    "/ip4/direccion_ip_nodo2/tcp/9096/p2p/QmClusterPeerID2"
+    "/ip4/direccion_ip_nodo3/tcp/9096/p2p/QmClusterPeerID3"
+  ],
+
+ en cada nodo se puede obtener el Cluster peer ID:
+
+ipfs-cluster-ctl id
+
+
+5.3. Una vez modificado (EN TODOS LOS NODOS)
+
+pkill ipfs-cluster-service
+ipfs-cluster-service daemon &
+
+
+
+📁 6. Subir y verificar archivos en el cluster
+
+En cualquier nodo:
+echo "Hola desde el nodo 1" > hola.txt
+
+ipfs-cluster-ctl add hola.txt
+
+Verificar:
+ipfs-cluster-ctl pin ls
+
+
+BORRAR EN EL CLUSTER:
+
+ipfs-cluster-ctl pin rm CID
