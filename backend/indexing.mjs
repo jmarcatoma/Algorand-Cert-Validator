@@ -381,7 +381,18 @@ async function getRootCid() {
       console.log(`[getRootCid] Intentando leer de writer activo: ${currentWriter.base}`);
       const st = await currentWriter.client.files.stat("/cert-index", { hash: true });
       const cid = (st.cid || st.hash || "").toString();
-      if (cid) return cid;
+      // Solo devolvemos el root si /cert-index/by-hash tiene contenido
+      try {
+        for await (const _ of currentWriter.client.files.ls("/cert-index/by-hash")) {
+          if (cid) {
+            console.log(`[getRootCid] Usando root desde writer (${currentWriter.base}): ${cid}`);
+            return cid;
+          }
+        }
+        console.warn("[getRootCid] Writer sin shards en /cert-index/by-hash; se ignora root", cid);
+      } catch (lsErr) {
+        console.warn("[getRootCid] /cert-index/by-hash no accesible en writer; fallback IPNS:", lsErr.message);
+      }
     } catch (e) {
       console.warn("[getRootCid] Falló lectura en currentWriter:", e.message);
     }
@@ -392,8 +403,16 @@ async function getRootCid() {
     const localClient = create(IPFS_ENDPOINTS[0]);
     const st = await localClient.files.stat("/cert-index", { hash: true });
     const cid = (st.cid || st.hash || "").toString();
-    if (cid) {
-      return cid;
+    try {
+        for await (const _ of localClient.files.ls("/cert-index/by-hash")) {
+          if (cid) {
+            console.log(`[getRootCid] Usando root desde endpoint local (${IPFS_ENDPOINTS[0]}): ${cid}`);
+            return cid;
+          }
+        }
+      console.warn("[getRootCid] /cert-index local sin shards; fallback IPNS");
+    } catch (lsErr) {
+      console.warn("[getRootCid] /cert-index/by-hash no accesible en endpoint local; fallback IPNS:", lsErr.message);
     }
   } catch (e) {
     // Ignoramos error si no existe localmente y vamos a IPNS
@@ -408,6 +427,7 @@ async function getRootCid() {
       for await (const name of stream) {
         const m = name.match(/\/ipfs\/([^/]+)/);
         if (m && m[1]) {
+          console.log(`[getRootCid] Usando root desde IPNS ${IPFS_INDEX_IPNS_KEY}: ${m[1]}`);
           return m[1];
         }
       }
@@ -421,6 +441,7 @@ async function getRootCid() {
   const st = await client.files.stat("/cert-index", { hash: true });
   const cid = (st.cid || st.hash || "").toString();
   if (!cid) throw new Error("No se pudo obtener CID de /cert-index");
+  console.log(`[getRootCid] Usando root desde fallback writer: ${cid}`);
   return cid;
 }
 

@@ -38,8 +38,32 @@ const toJSONSafe = (x) =>
   JSON.parse(JSON.stringify(x, (_, v) => (typeof v === 'bigint' ? v.toString() : v)));
 
 // ---------- ALGOD client ----------
-const ALGOD_URL = process.env.ALGOD_URL || 'http://127.0.0.1:4001';
-const ALGOD_TOKEN = process.env.ALGOD_TOKEN || '';
+// Preferir primer nodo de ALGOD_NODES como URL/token por defecto
+let ALGOD_URL = process.env.ALGOD_URL || '';
+let ALGOD_TOKEN = process.env.ALGOD_TOKEN || '';
+
+if (!ALGOD_URL && process.env.ALGOD_NODES) {
+  const firstNode = process.env.ALGOD_NODES.split(',').map(s => s.trim()).filter(Boolean)[0];
+  if (firstNode) {
+    // Formatos soportados:
+    // - http://ip:port:token
+    // - http://ip:port (sin token)
+    const parts = firstNode.split(':');
+    if (parts.length >= 4) {
+      // http:// ip port token...
+      const protocol = parts[0]; // http
+      const host = parts[1].replace(/^\/\//, ''); // //192.168...
+      const port = parts[2];
+      const token = parts.slice(3).join(':');
+      ALGOD_URL = `${protocol}://${host}:${port}`;
+      ALGOD_TOKEN = token;
+    } else {
+      ALGOD_URL = firstNode;
+    }
+  }
+}
+
+if (!ALGOD_URL) ALGOD_URL = 'http://127.0.0.1:4001';
 
 const u = new URL(ALGOD_URL);
 const ALGOD_PORT = u.port ? Number(u.port) : (u.protocol === 'https:' ? 443 : 4001);
@@ -1345,6 +1369,15 @@ app.post('/api/index/publish-hash', async (req, res) => {
 
     // Publicar raíz del índice
     const rootCid = await publishIndexRoot();
+
+    // LOG detallado para debugging/QA
+    console.log('[publish-hash] meta', meta);
+    console.log('[publish-hash] paths', {
+      stagingMetaPath,
+      finalMetaPath,
+      ownerListPath,
+    });
+    console.log('[publish-hash] rootCid', rootCid);
 
     return res.json({
       ok: true,
